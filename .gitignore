@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+.Python
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data and checkpoints (large files)
+data/
+checkpoints/
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.jsonl
+
+# DeepSpeed
+.deepspeed_*
+.ds_*
+
+# Weights & Biases
+wandb/
+
+# Environment / secrets
+.env
+.env.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Misc
+*.log
+*.cache/
