@@ -1,16 +1,21 @@
 # LLM Training Pipeline
 
-A complete, from-scratch LLM training pipeline covering **pre-training**, **supervised fine-tuning (SFT)**, and **alignment** (DPO / PPO / GRPO).
+A complete, from-scratch LLM training pipeline covering **pre-training**, **supervised fine-tuning (SFT)**, **alignment** (DPO / PPO / GRPO), and **multimodal (vision-language) training**.
 
 Built with Flash Attention 2/3, DeepSpeed ZeRO-2/3, and NVIDIA Transformer Engine for FP8 mixed-precision training.
 
 ```
-Pre-training ──→ SFT ──┬──→ Reward Model ──→ PPO (RLHF)
-   train.py      sft.py│    reward_model.py   ppo.py
-                       ├──→ DPO (offline preference)
-                       │    dpo.py
-                       └──→ GRPO (no critic, DeepSeek-R1 style)
-                            grpo.py
+                          ┌──→ Reward Model ──→ PPO (RLHF)
+                          │    reward_model.py   ppo.py
+Pre-training ──→ SFT ──┬─┤
+   train.py      sft.py│ ├──→ DPO (offline preference)
+                       │ │    dpo.py
+                       │ └──→ GRPO (no critic, DeepSeek-R1 style)
+                       │      grpo.py
+                       │
+                       └──→ Multimodal (Vision-Language)
+                             Stage 1: Alignment ──→ Stage 2: MM-SFT ──→ Stage 3: MM-DPO / MM-GRPO
+                             multimodal_train.py
 ```
 
 ## Features
@@ -24,6 +29,9 @@ Pre-training ──→ SFT ──┬──→ Reward Model ──→ PPO (RLHF)
 - **Multiple alignment methods** — DPO, IPO, SimPO, PPO, GRPO
 - **GRPO** — DeepSeek-R1 style training with rule-based rewards, no critic needed
 - **Adaptive KL penalty** — automatic KL coefficient adjustment for PPO/GRPO
+- **Multimodal (VLM)** — LLaVA/InternVL-style vision-language model with 3-stage training
+- **Vision Encoder** — ViT with SigLIP/CLIP support, pixel shuffle token compression, dynamic resolution tiling
+- **Video understanding** — frame sampling and temporal processing for video inputs
 
 ## Architecture
 
@@ -36,6 +44,8 @@ Pre-training ──→ SFT ──┬──→ Reward Model ──→ PPO (RLHF)
 | Mixed Precision | BF16 / FP8 via Transformer Engine |
 | Distributed | DeepSpeed ZeRO-2/3 |
 | Fine-tuning | Full parameters / LoRA |
+| Vision | ViT / SigLIP / CLIP + Pixel Shuffle + MLP Projector |
+| Multimodal | Interleaved image/video-text, dynamic resolution tiling |
 
 ### Model Sizes
 
@@ -190,6 +200,61 @@ deepspeed --num_gpus=8 grpo.py \
     --group_size 8
 ```
 
+### 4. Multimodal (Vision-Language) Training
+
+Three-stage training pipeline following the LLaVA/InternVL approach:
+
+```bash
+# Generate synthetic multimodal data for testing
+python multimodal_data.py
+
+# Stage 1: Vision-Language Alignment (train projector only)
+deepspeed --num_gpus=8 multimodal_train.py --stage 1 \
+    --deepspeed ds_config_sft.json \
+    --data_path data/mm_alignment.jsonl \
+    --image_dir data/images/ \
+    --max_steps 5000
+
+# Stage 2: Multimodal Instruction Tuning (train projector + LLM)
+deepspeed --num_gpus=8 multimodal_train.py --stage 2 \
+    --deepspeed ds_config_sft.json \
+    --base_model ./checkpoints/mm_stage1_final \
+    --data_path data/mm_sft.jsonl \
+    --image_dir data/ \
+    --max_steps 10000
+
+# Stage 3a: Multimodal DPO
+deepspeed --num_gpus=8 multimodal_train.py --stage 3 --rl_method dpo \
+    --deepspeed ds_config_sft.json \
+    --base_model ./checkpoints/mm_stage2_final \
+    --data_path data/mm_dpo.jsonl \
+    --image_dir data/ \
+    --max_steps 2000
+
+# Stage 3b: Multimodal GRPO
+deepspeed --num_gpus=8 multimodal_train.py --stage 3 --rl_method grpo \
+    --deepspeed ds_config_sft.json \
+    --base_model ./checkpoints/mm_stage2_final \
+    --data_path data/mm_grpo.jsonl \
+    --image_dir data/ \
+    --group_size 4 --max_steps 1000
+
+# With pretrained SigLIP vision encoder (recommended)
+deepspeed --num_gpus=8 multimodal_train.py --stage 1 \
+    --deepspeed ds_config_sft.json \
+    --vision_encoder vit_so400m_patch14_siglip_384 \
+    --data_path data/mm_alignment.jsonl \
+    --image_dir data/images/
+```
+
+#### Multimodal Training Stages
+
+| Stage | Trainable | Frozen | Purpose |
+|-------|-----------|--------|---------|
+| 1 - Alignment | Projector | Vision encoder + LLM | Learn vision-text mapping |
+| 2 - Instruction Tuning | Projector + LLM | Vision encoder | Multimodal chat ability |
+| 3 - RL Post-training | All | — | Preference alignment (DPO/GRPO) |
+
 ## Data Formats
 
 ### SFT (`sft_train.jsonl`)
@@ -229,6 +294,49 @@ deepspeed --num_gpus=8 grpo.py \
 {"prompt": "Explain how gravity works."}
 ```
 
+### Multimodal Alignment (`mm_alignment.jsonl`)
+
+```json
+{"image": "path/to/image.jpg", "caption": "A cat sitting on a mat"}
+```
+
+### Multimodal SFT (`mm_sft.jsonl`)
+
+```json
+{"image": "path.jpg", "messages": [
+    {"role": "user", "content": "<image>\nDescribe this image."},
+    {"role": "assistant", "content": "The image shows..."}
+]}
+{"video": "path.mp4", "messages": [
+    {"role": "user", "content": "<video>\nWhat happens in this video?"},
+    {"role": "assistant", "content": "In this video..."}
+]}
+{"images": ["img1.jpg", "img2.jpg"], "messages": [
+    {"role": "user", "content": "<image> <image>\nCompare these two images."},
+    {"role": "assistant", "content": "The first image shows..."}
+]}
+```
+
+### Multimodal DPO (`mm_dpo.jsonl`)
+
+```json
+{"image": "path.jpg",
+ "chosen": [
+    {"role": "user", "content": "<image>\nDescribe"},
+    {"role": "assistant", "content": "Detailed description..."}
+ ],
+ "rejected": [
+    {"role": "user", "content": "<image>\nDescribe"},
+    {"role": "assistant", "content": "I see an image."}
+ ]}
+```
+
+### Multimodal GRPO (`mm_grpo.jsonl`)
+
+```json
+{"image": "chart.png", "prompt": "What is the highest value?", "answer": "42"}
+```
+
 ## Alignment Methods Comparison
 
 | | DPO | IPO | SimPO | PPO | GRPO |
@@ -264,6 +372,10 @@ deepspeed --num_gpus=8 grpo.py \
 ├── reward_model.py          # Reward model training
 ├── ppo.py                   # PPO (RLHF)
 ├── grpo.py                  # GRPO (DeepSeek-R1 style)
+├── vision_encoder.py        # ViT encoder + pixel shuffle + projector
+├── multimodal_model.py      # Vision-language model (LLaVA/InternVL style)
+├── multimodal_train.py      # Multimodal training (all stages)
+├── multimodal_data.py       # Multimodal datasets + synthetic data generator
 ├── generate_sample_data.py  # Synthetic SFT/DPO/PPO test data
 ├── generate_grpo_data.py    # Math/reasoning GRPO data generator
 ├── ds_config.json           # DeepSpeed ZeRO-2 config (pre-training)
@@ -283,6 +395,9 @@ deepspeed --num_gpus=8 grpo.py \
 - [SimPO](https://arxiv.org/abs/2405.14734) — Meng et al. (2024)
 - [PPO / RLHF](https://arxiv.org/abs/2203.02155) — Ouyang et al. (2022)
 - [GRPO / DeepSeek-R1](https://arxiv.org/abs/2501.12948) — DeepSeek (2025)
+- [LLaVA](https://arxiv.org/abs/2304.08485) — Liu et al. (2023)
+- [InternVL](https://arxiv.org/abs/2312.14238) — Chen et al. (2023)
+- [SigLIP](https://arxiv.org/abs/2303.15343) — Zhai et al. (2023)
 
 ## License
 
