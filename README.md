@@ -2,7 +2,7 @@
 
 A complete, from-scratch LLM training pipeline covering **pre-training**, **supervised fine-tuning (SFT)**, and **alignment** (DPO / PPO / GRPO).
 
-Built with Flash Attention 2, DeepSpeed ZeRO-2/3, and NVIDIA Transformer Engine for FP8 mixed-precision training.
+Built with Flash Attention 2/3, DeepSpeed ZeRO-2/3, and NVIDIA Transformer Engine for FP8 mixed-precision training.
 
 ```
 Pre-training ──→ SFT ──┬──→ Reward Model ──→ PPO (RLHF)
@@ -15,7 +15,7 @@ Pre-training ──→ SFT ──┬──→ Reward Model ──→ PPO (RLHF)
 
 ## Features
 
-- **Flash Attention 2** — fast and memory-efficient attention
+- **Flash Attention 2/3** — fast and memory-efficient attention (FA3 via `kernels` library for Hopper GPUs)
 - **DeepSpeed ZeRO-2/3** — distributed training across multiple GPUs
 - **Transformer Engine FP8** — 2x throughput on H100 GPUs
 - **LoRA** — memory-efficient fine-tuning with merge support
@@ -29,7 +29,7 @@ Pre-training ──→ SFT ──┬──→ Reward Model ──→ PPO (RLHF)
 
 | Component | Implementation |
 |-----------|---------------|
-| Attention | Flash Attention 2 + Grouped-Query Attention (GQA) |
+| Attention | Flash Attention 2/3 + Grouped-Query Attention (GQA) |
 | Position | Rotary Positional Embedding (RoPE) |
 | FFN | SwiGLU |
 | Norm | RMSNorm |
@@ -49,11 +49,19 @@ Pre-training ──→ SFT ──┬──→ Reward Model ──→ PPO (RLHF)
 
 ## Getting Started
 
+### Requirements
+
+- Python 3.9+
+- CUDA 11.8+
+- NVIDIA GPU (Ampere or newer recommended; Hopper for FP8 and Flash Attention 3)
 ### Installation
 
 ```bash
 pip install torch>=2.1 deepspeed transformer-engine flash-attn \
     datasets tiktoken wandb tqdm
+
+# Optional: Flash Attention 3 (Hopper GPUs only)
+pip install kernels
 ```
 
 ### Quick Test with Synthetic Data
@@ -85,6 +93,14 @@ deepspeed --num_gpus=8 train.py \
     --model_size 350m \
     --deepspeed ds_config.json \
     --data_path data/owt.pt \
+    --max_steps 50000
+
+# With Flash Attention 3 on Hopper GPUs (1.5-2x faster)
+deepspeed --num_gpus=8 train.py \
+    --model_size 350m \
+    --deepspeed ds_config.json \
+    --data_path data/owt.pt \
+    --use_flash_attn_3 \
     --max_steps 50000
 ```
 
@@ -264,6 +280,7 @@ deepspeed --num_gpus=8 grpo.py \
 ## References
 
 - [Flash Attention 2](https://arxiv.org/abs/2307.08691) — Dao (2023)
+- [Flash Attention 3](https://arxiv.org/abs/2407.08608) — Shah et al. (2024)
 - [DeepSpeed ZeRO](https://arxiv.org/abs/1910.02054) — Rajbhandari et al. (2020)
 - [LoRA](https://arxiv.org/abs/2106.09685) — Hu et al. (2021)
 - [DPO](https://arxiv.org/abs/2305.18290) — Rafailov et al. (2023)

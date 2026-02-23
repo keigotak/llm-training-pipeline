@@ -26,9 +26,18 @@ from torch.utils.data import Dataset, DataLoader
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling, Format
 
-# Flash Attention
+# Flash Attention 2
 from flash_attn import flash_attn_func
-from flash_attn.modules.mha import FlashSelfAttention
+
+# Flash Attention 3 (loaded lazily via kernels library)
+_fa3_module = None
+
+def _get_fa3():
+    global _fa3_module
+    if _fa3_module is None:
+        from kernels import get_kernel
+        _fa3_module = get_kernel("kernels-community/flash-attn3")
+    return _fa3_module
 
 
 # =============================================================================
@@ -47,6 +56,7 @@ class ModelConfig:
     bias: bool = False
     rope_theta: float = 10000.0
     use_flash_attn: bool = True
+    use_flash_attn_3: bool = False    # Flash Attention 3 via kernels (Hopper GPU)
     use_te: bool = True               # Use Transformer Engine layers
 
     def __post_init__(self):
@@ -98,6 +108,7 @@ class GQAFlashAttention(nn.Module):
         self.head_dim = config.head_dim
         self.n_rep = self.n_heads // self.n_kv_heads
         self.use_flash = config.use_flash_attn
+        self.use_flash_3 = config.use_flash_attn_3
 
         self.q_proj = nn.Linear(config.d_model, config.n_heads * config.head_dim, bias=config.bias)
         self.k_proj = nn.Linear(config.d_model, config.n_kv_heads * config.head_dim, bias=config.bias)
@@ -107,12 +118,10 @@ class GQAFlashAttention(nn.Module):
         self.rotary = RotaryEmbedding(config.head_dim, config.max_seq_len, config.rope_theta)
         self.attn_dropout = config.dropout
 
-        if self.use_flash:
-            self.flash_attn = FlashSelfAttention(
-                causal=True,
-                softmax_scale=1.0 / math.sqrt(self.head_dim),
-                attention_dropout=config.dropout,
-            )
+        # Load Flash Attention 3 kernel
+        if self.use_flash_3:
+            fa3 = _get_fa3()
+            self.fa3_func = fa3.flash_attn_func
 
     def forward(self, x: torch.Tensor):
         B, S, _ = x.shape
@@ -121,26 +130,29 @@ class GQAFlashAttention(nn.Module):
         k = self.k_proj(x).view(B, S, self.n_kv_heads, self.head_dim)
         v = self.v_proj(x).view(B, S, self.n_kv_heads, self.head_dim)
 
-        # RoPE
+        # RoPE (applied in (B, heads, S, D) format)
         cos, sin = self.rotary(S)
         q = q.transpose(1, 2)  # (B, n_heads, S, D)
-        k = k.transpose(1, 2)
+        k = k.transpose(1, 2)  # (B, n_kv_heads, S, D)
         q = apply_rotary_emb(q, cos, sin)
         k = apply_rotary_emb(k, cos, sin)
 
-        # Expand KV for GQA
-        if self.n_rep > 1:
-            k = k.repeat_interleave(self.n_rep, dim=1)
-            v = v.transpose(1, 2).repeat_interleave(self.n_rep, dim=1)
-        else:
-            v = v.transpose(1, 2)
-
-        if self.use_flash:
-            # Flash Attention expects (B, S, n_heads, head_dim)
-            q = q.transpose(1, 2).contiguous()
-            k = k.transpose(1, 2).contiguous()
-            v = v.transpose(1, 2).contiguous()
-            # Use flash_attn_func for flexibility
+        if self.use_flash_3:
+            # Flash Attention 3: native GQA via pack_gqa (no KV expansion needed)
+            q = q.transpose(1, 2).contiguous()   # (B, S, n_heads, D)
+            k = k.transpose(1, 2).contiguous()   # (B, S, n_kv_heads, D)
+            v = v.contiguous()                    # (B, S, n_kv_heads, D)
+            attn_out = self.fa3_func(q, k, v, causal=True, pack_gqa=True)
+        elif self.use_flash:
+            # Flash Attention 2: expand KV for GQA, then use flash_attn_func
+            if self.n_rep > 1:
+                k = k.repeat_interleave(self.n_rep, dim=1)
+                v = v.transpose(1, 2).repeat_interleave(self.n_rep, dim=1)
+            else:
+                v = v.transpose(1, 2)
+            q = q.transpose(1, 2).contiguous()   # (B, S, n_heads, D)
+            k = k.transpose(1, 2).contiguous()   # (B, S, n_heads, D)
+            v = v.transpose(1, 2).contiguous()   # (B, S, n_heads, D)
             attn_out = flash_attn_func(
                 q, k, v,
                 dropout_p=self.attn_dropout if self.training else 0.0,
@@ -148,6 +160,11 @@ class GQAFlashAttention(nn.Module):
             )
         else:
             # Standard scaled dot-product attention (PyTorch 2.0+)
+            if self.n_rep > 1:
+                k = k.repeat_interleave(self.n_rep, dim=1)
+                v = v.transpose(1, 2).repeat_interleave(self.n_rep, dim=1)
+            else:
+                v = v.transpose(1, 2)
             attn_out = F.scaled_dot_product_attention(
                 q, k, v,
                 attn_mask=None,
@@ -382,7 +399,8 @@ def train(args):
 
     if global_rank == 0:
         print(f"World size: {world_size}")
-        print(f"Flash Attention: {args.use_flash_attn}")
+        attn_backend = "Flash Attention 3" if args.use_flash_attn_3 else f"Flash Attention 2: {args.use_flash_attn}"
+        print(f"Attention: {attn_backend}")
         print(f"Transformer Engine (FP8): {args.use_te}")
 
     # -------------------------------------------------------------------------
@@ -402,6 +420,7 @@ def train(args):
     config = ModelConfig(
         max_seq_len=args.seq_len,
         use_flash_attn=args.use_flash_attn,
+        use_flash_attn_3=args.use_flash_attn_3,
         use_te=args.use_te,
         dropout=args.dropout,
         **model_kwargs,
@@ -559,6 +578,8 @@ def parse_args():
     parser.add_argument("--no_flash_attn", action="store_false", dest="use_flash_attn")
     parser.add_argument("--use_te", action="store_true", default=True)
     parser.add_argument("--no_te", action="store_false", dest="use_te")
+    parser.add_argument("--use_flash_attn_3", action="store_true", default=False,
+                        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)")
     parser.add_argument("--fp8", action="store_true", default=False,
                         help="Enable FP8 training via Transformer Engine (requires Hopper GPU)")
 

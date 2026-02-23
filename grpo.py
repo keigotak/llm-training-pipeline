@@ -726,6 +726,7 @@ def train_grpo(args):
     config = ModelConfig(
         max_seq_len=args.seq_len,
         use_flash_attn=args.use_flash_attn,
+        use_flash_attn_3=args.use_flash_attn_3,
         use_te=args.use_te,
         **model_kwargs,
     )
@@ -926,6 +927,8 @@ def parse_args():
     parser.add_argument("--no_flash_attn", action="store_false", dest="use_flash_attn")
     parser.add_argument("--use_te", action="store_true", default=True)
     parser.add_argument("--no_te", action="store_false", dest="use_te")
+    parser.add_argument("--use_flash_attn_3", action="store_true", default=False,
+                        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)")
     parser.add_argument("--fp8", action="store_true", default=False)
 
     # GRPO
