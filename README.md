@@ -49,11 +49,6 @@ Pre-training ──→ SFT ──┬──→ Reward Model ──→ PPO (RLHF)
 
 ## Getting Started
 
-### Requirements
-
-- Python 3.9+
-- CUDA 11.8+
-- NVIDIA GPU (Ampere or newer recommended; Hopper for FP8 and Flash Attention 3)
 ### Installation
 
 ```bash
