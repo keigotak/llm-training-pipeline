@@ -532,15 +532,17 @@ Not yet validated:
 
 Roadmap
 
+## Roadmap
+
 Planned improvements:
 
-* Add unit tests and CI
-* Add reproducible experiment configs
-* Add small benchmark runs
-* Add training curves and example logs
-* Add more rigorous reward-model evaluation
-* Improve documentation for each training stage
-* Add agent-specific post-training examples
+- Add unit tests
+- Add reproducible experiment configs
+- Add small benchmark runs
+- Add training curves and example logs
+- Add more rigorous reward-model evaluation
+- Improve documentation for each training stage
+- Add agent-specific post-training examples
 
 ⸻
 
