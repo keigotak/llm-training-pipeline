@@ -8,10 +8,13 @@ This repository explores the major stages of contemporary language model develop
 - Multimodal vision-language training prototypes
 The goal is not to reproduce frontier-scale training, but to provide a readable and extensible implementation of the key algorithms, model components, and engineering patterns used in modern LLM training.
 ---
-## Why this project exists
+
+Why this project exists
+
 Most open-source examples focus on a single stage of language model training.
+
 This project aims to show how the full workflow fits together:
-```text
+
 Pre-training
     ↓
 Supervised Fine-Tuning (SFT)
@@ -38,6 +41,45 @@ Pre-training ──→ SFT ──┬──────────┤
                        │
                        └──→ Multimodal Vision-Language Training
                             multimodal_train.py
+
+⸻
+
+## Why this project exists
+
+Most open-source examples focus on a single stage of language model training.
+
+This project aims to show how the full workflow fits together:
+
+```text
+Pre-training
+    ↓
+Supervised Fine-Tuning (SFT)
+    ↓
+Preference Optimization / RLHF-style Post-Training
+    ↓
+Evaluation / Iteration
+```
+
+I built this repository as an independent research and engineering project to deepen my understanding of modern LLM training systems, especially the transition from base models to instruction-following and preference-optimized models.
+
+My professional work includes domain-specific language models, evaluation workflows, and agentic AI systems. This repository serves as a compact environment for exploring the algorithmic and engineering foundations behind those systems.
+
+---
+
+## Pipeline Overview
+
+```text
+                                  ┌──→ Reward Model ──→ PPO
+                                  │    reward_model.py   ppo.py
+Pre-training ──→ SFT ──┬──────────┤
+   train.py      sft.py│          ├──→ DPO / IPO / SimPO
+                       │          │    dpo.py
+                       │          └──→ GRPO
+                       │               grpo.py
+                       │
+                       └──→ Multimodal Vision-Language Training
+                            multimodal_train.py
+```
 
 ⸻
 
