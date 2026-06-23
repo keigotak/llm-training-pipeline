@@ -162,6 +162,43 @@ These configurations are provided for code structure and experimentation. Actual
 
 ⸻
 
+Quality Gate
+
+This repository includes lightweight CPU checks for the core model, data, loss, and reward paths. These checks do not replace full CUDA/DeepSpeed training, but they make the implementation reviewable without requiring a GPU.
+
+What is currently checked:
+
+* GPT forward pass shape and scalar loss on a tiny CPU model
+* SFT, preference, and GRPO JSONL data-format loading
+* DPO, reward-model, and GRPO loss/reward behavior
+* Black formatting, Ruff linting, Python syntax checks, and pytest in GitHub Actions
+* Stage-level CPU smoke examples under `examples/`
+
+Smoke examples:
+
+bash examples/pretrain_smoke.sh
+bash examples/sft_smoke.sh
+bash examples/dpo_smoke.sh
+bash examples/reward_model_smoke.sh
+bash examples/ppo_smoke.sh
+bash examples/grpo_smoke.sh
+
+Full local quality gate:
+
+black --check .
+ruff check .
+pytest -q
+python -m py_compile train.py sft.py dpo.py reward_model.py ppo.py grpo.py multimodal_train.py
+
+Limitations:
+
+* Full training paths are intended for CUDA environments with DeepSpeed.
+* Flash Attention 3 and Transformer Engine are optional GPU dependencies.
+* Multimodal training includes dataset, model, and training structure, but meaningful results require real image/video datasets and GPU training.
+* Synthetic datasets are format checks, not training-quality corpora.
+
+⸻
+
 Installation
 
 pip install "torch>=2.1" deepspeed transformer-engine flash-attn \
@@ -178,6 +215,18 @@ If installation of flash-attn or transformer-engine fails, first verify CUDA, Py
 Quick Start with Synthetic Data
 
 Generate synthetic data for the major stages:
+
+Run CPU quality checks:
+
+pytest -q
+bash examples/pretrain_smoke.sh
+bash examples/sft_smoke.sh
+bash examples/dpo_smoke.sh
+bash examples/reward_model_smoke.sh
+bash examples/ppo_smoke.sh
+bash examples/grpo_smoke.sh
+
+Generate sample data for all stages:
 
 python generate_sample_data.py --output_dir data/
 
@@ -494,17 +543,20 @@ Project Structure
 ├── sft.py                   # Supervised fine-tuning and LoRA
 ├── dpo.py                   # DPO / IPO / SimPO
 ├── reward_model.py          # Reward model training
-├── ppo.py                   # PPO-style post-training
-├── grpo.py                  # GRPO-style post-training
-├── vision_encoder.py        # Vision encoder components
-├── multimodal_model.py      # Vision-language model components
-├── multimodal_train.py      # Multimodal training stages
-├── multimodal_data.py       # Multimodal dataset utilities
-├── generate_sample_data.py  # Synthetic data generator
-├── generate_grpo_data.py    # Synthetic reasoning-prompt generator
-├── ds_config.json           # DeepSpeed ZeRO-2 config
-├── ds_config_zero3.json     # DeepSpeed ZeRO-3 config
-├── ds_config_sft.json       # DeepSpeed config for post-training
+├── ppo.py                   # PPO (RLHF)
+├── grpo.py                  # GRPO (DeepSeek-R1 style)
+├── vision_encoder.py        # ViT encoder + pixel shuffle + projector
+├── multimodal_model.py      # Vision-language model (LLaVA/InternVL style)
+├── multimodal_train.py      # Multimodal training (all stages)
+├── multimodal_data.py       # Multimodal datasets + synthetic data generator
+├── generate_sample_data.py  # Synthetic SFT/DPO/PPO test data
+├── generate_grpo_data.py    # Math/reasoning GRPO data generator
+├── examples/                # CPU smoke checks for each stage
+├── tests/                   # Pytest coverage for model/data/reward paths
+├── .github/workflows/       # CI quality gate
+├── ds_config.json           # DeepSpeed ZeRO-2 config (pre-training)
+├── ds_config_zero3.json     # DeepSpeed ZeRO-3 config (large models)
+├── ds_config_sft.json       # DeepSpeed config (post-training)
 └── LICENSE
 
 ⸻

@@ -24,16 +24,25 @@ import math
 import os
 import time
 from contextlib import nullcontext
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import deepspeed
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
-import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import DelayedScaling, Format
+try:
+    import deepspeed
+except ImportError:  # pragma: no cover - optional distributed dependency
+    deepspeed = None
+
+try:
+    import transformer_engine.pytorch as te
+    from transformer_engine.common.recipe import DelayedScaling, Format
+except ImportError:  # pragma: no cover - optional GPU dependency
+    te = None
+    DelayedScaling = None
+    Format = None
 
 # Import model from pre-training
 from train import GPTModel, ModelConfig
@@ -45,7 +54,13 @@ from train import GPTModel, ModelConfig
 class LoRALinear(nn.Module):
     """Low-Rank Adaptation wrapper for nn.Linear."""
 
-    def __init__(self, original: nn.Linear, rank: int = 16, alpha: float = 32.0, dropout: float = 0.05):
+    def __init__(
+        self,
+        original: nn.Linear,
+        rank: int = 16,
+        alpha: float = 32.0,
+        dropout: float = 0.05,
+    ):
         super().__init__()
         self.original = original
         self.rank = rank
@@ -75,9 +90,10 @@ class LoRALinear(nn.Module):
     def merge(self) -> nn.Linear:
         """Merge LoRA weights into the original linear layer."""
         with torch.no_grad():
-            merged_weight = self.original.weight + (
-                self.lora_b.weight @ self.lora_a.weight
-            ) * self.scaling
+            merged_weight = (
+                self.original.weight
+                + (self.lora_b.weight @ self.lora_a.weight) * self.scaling
+            )
             self.original.weight.copy_(merged_weight)
         return self.original
 
@@ -136,6 +152,7 @@ class ChatTokenizer:
 
     def __init__(self, encoding_name: str = "gpt2"):
         import tiktoken
+
         self.enc = tiktoken.get_encoding(encoding_name)
         self.vocab_size = self.enc.n_vocab
 
@@ -185,7 +202,9 @@ class ChatTokenizer:
             if role == "assistant":
                 loss_mask.extend([1] * len(content_tokens))  # Train on assistant
             else:
-                loss_mask.extend([0] * len(content_tokens))  # Don't train on user/system
+                loss_mask.extend(
+                    [0] * len(content_tokens)
+                )  # Don't train on user/system
 
             # Turn end
             input_ids.extend(turn_end_tokens)
@@ -206,7 +225,9 @@ class ChatTokenizer:
 class SFTDataset(Dataset):
     """Dataset for supervised fine-tuning from JSONL chat data."""
 
-    def __init__(self, data_path: str, tokenizer: ChatTokenizer, max_seq_len: int = 2048):
+    def __init__(
+        self, data_path: str, tokenizer: ChatTokenizer, max_seq_len: int = 2048
+    ):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.examples = []
@@ -230,15 +251,17 @@ class SFTDataset(Dataset):
         messages = self.examples[idx]
         encoded = self.tokenizer.encode_chat(messages)
 
-        input_ids = encoded["input_ids"][:self.max_seq_len]
-        loss_mask = encoded["loss_mask"][:self.max_seq_len]
+        input_ids = encoded["input_ids"][: self.max_seq_len]
+        loss_mask = encoded["loss_mask"][: self.max_seq_len]
 
         # Labels: shift by 1 for next-token prediction
         labels = input_ids[1:] + [self.tokenizer.pad_id]
         loss_mask = loss_mask[1:] + [0]
 
         # Apply loss mask: set non-trainable positions to -100
-        labels = [l if m == 1 else -100 for l, m in zip(labels, loss_mask)]
+        labels = [
+            label if mask == 1 else -100 for label, mask in zip(labels, loss_mask)
+        ]
 
         return {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
@@ -281,10 +304,12 @@ class SFTCollator:
 # Training
 # =============================================================================
 def train_sft(args):
+    if deepspeed is None:
+        raise ImportError("DeepSpeed is required for SFT training.")
+
     deepspeed.init_distributed()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     global_rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
     torch.cuda.set_device(local_rank)
 
     # -------------------------------------------------------------------------
@@ -297,7 +322,7 @@ def train_sft(args):
         "1.3b": dict(n_layers=24, n_heads=32, d_model=2048),
         "2.7b": dict(n_layers=32, n_heads=32, d_model=2560),
         "6.7b": dict(n_layers=32, n_heads=32, d_model=4096),
-        "13b":  dict(n_layers=40, n_heads=40, d_model=5120),
+        "13b": dict(n_layers=40, n_heads=40, d_model=5120),
     }
 
     model_kwargs = MODEL_CONFIGS.get(args.model_size, MODEL_CONFIGS["350m"])
@@ -317,12 +342,18 @@ def train_sft(args):
         if global_rank == 0:
             print(f"Loading base model from {args.base_model}")
         # DeepSpeed checkpoint
-        _, client_state = model.load_checkpoint(args.base_model) if hasattr(model, "load_checkpoint") else (None, None)
+        _, client_state = (
+            model.load_checkpoint(args.base_model)
+            if hasattr(model, "load_checkpoint")
+            else (None, None)
+        )
         if client_state is None:
             # Try loading as a plain state_dict
             ckpt_path = os.path.join(args.base_model, "pytorch_model.bin")
             if os.path.exists(ckpt_path):
-                state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+                state_dict = torch.load(
+                    ckpt_path, map_location="cpu", weights_only=True
+                )
                 model.load_state_dict(state_dict, strict=False)
             else:
                 # Try DeepSpeed format
@@ -357,7 +388,9 @@ def train_sft(args):
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         total = sum(p.numel() for p in model.parameters())
         if global_rank == 0:
-            print(f"Trainable: {trainable / 1e6:.1f}M / {total / 1e6:.1f}M ({100 * trainable / total:.2f}%)")
+            print(
+                f"Trainable: {trainable / 1e6:.1f}M / {total / 1e6:.1f}M ({100 * trainable / total:.2f}%)"
+            )
 
     # -------------------------------------------------------------------------
     # Dataset & Collator
@@ -371,7 +404,9 @@ def train_sft(args):
     # -------------------------------------------------------------------------
     fp8_ctx = nullcontext()
     if args.use_te and args.fp8:
-        fp8_recipe = DelayedScaling(fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max")
+        fp8_recipe = DelayedScaling(
+            fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max"
+        )
         fp8_ctx = te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe)
 
     # -------------------------------------------------------------------------
@@ -397,8 +432,10 @@ def train_sft(args):
         print(f"\n{'='*70}")
         print(f"SFT Training | Model: {args.model_size} | LoRA: {args.use_lora}")
         print(f"Data: {len(dataset)} examples | Max steps: {args.max_steps}")
-        print(f"Batch/GPU: {model_engine.train_micro_batch_size_per_gpu()} | "
-              f"Grad accum: {model_engine.gradient_accumulation_steps()}")
+        print(
+            f"Batch/GPU: {model_engine.train_micro_batch_size_per_gpu()} | "
+            f"Grad accum: {model_engine.gradient_accumulation_steps()}"
+        )
         print(f"{'='*70}\n")
 
     data_iter = iter(train_loader)
@@ -425,11 +462,14 @@ def train_sft(args):
             avg_loss = running_loss / args.log_interval
             elapsed = time.time() - t_start
             lr = optimizer.param_groups[0]["lr"] if optimizer else 0
-            print(f"step {step:6d} | loss {avg_loss:.4f} | lr {lr:.2e} | {elapsed:.1f}s")
+            print(
+                f"step {step:6d} | loss {avg_loss:.4f} | lr {lr:.2e} | {elapsed:.1f}s"
+            )
             running_loss = 0.0
 
             try:
                 import wandb
+
                 if wandb.run:
                     wandb.log({"sft/loss": avg_loss, "sft/lr": lr, "sft/step": step})
             except ImportError:
@@ -453,7 +493,10 @@ def train_sft(args):
                 merged_model = merge_lora(model)
                 merged_path = os.path.join(args.save_dir, "sft_merged")
                 os.makedirs(merged_path, exist_ok=True)
-                torch.save(merged_model.state_dict(), os.path.join(merged_path, "pytorch_model.bin"))
+                torch.save(
+                    merged_model.state_dict(),
+                    os.path.join(merged_path, "pytorch_model.bin"),
+                )
                 print(f"Merged model saved to {merged_path}")
 
     if global_rank == 0:
@@ -468,7 +511,9 @@ def parse_args():
 
     # Model
     parser.add_argument("--model_size", type=str, default="350m")
-    parser.add_argument("--base_model", type=str, default=None, help="Path to pre-trained checkpoint")
+    parser.add_argument(
+        "--base_model", type=str, default=None, help="Path to pre-trained checkpoint"
+    )
     parser.add_argument("--seq_len", type=int, default=2048)
     parser.add_argument("--dropout", type=float, default=0.0)
 
@@ -477,8 +522,12 @@ def parse_args():
     parser.add_argument("--no_flash_attn", action="store_false", dest="use_flash_attn")
     parser.add_argument("--use_te", action="store_true", default=True)
     parser.add_argument("--no_te", action="store_false", dest="use_te")
-    parser.add_argument("--use_flash_attn_3", action="store_true", default=False,
-                        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)")
+    parser.add_argument(
+        "--use_flash_attn_3",
+        action="store_true",
+        default=False,
+        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)",
+    )
     parser.add_argument("--fp8", action="store_true", default=False)
 
     # LoRA
@@ -486,8 +535,12 @@ def parse_args():
     parser.add_argument("--lora_rank", type=int, default=16)
     parser.add_argument("--lora_alpha", type=float, default=32.0)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
-    parser.add_argument("--lora_targets", type=str, default="q_proj,k_proj,v_proj,o_proj",
-                        help="Comma-separated target module names")
+    parser.add_argument(
+        "--lora_targets",
+        type=str,
+        default="q_proj,k_proj,v_proj,o_proj",
+        help="Comma-separated target module names",
+    )
     parser.add_argument("--merge_lora_on_save", action="store_true", default=False)
 
     # Data

@@ -38,7 +38,7 @@ def generate_arithmetic(difficulty: str = "easy"):
     if op == "/":
         result = int(result)
 
-    op_word = {"+" : "+", "-": "-", "*": "×", "/": "÷"}[op]
+    op_word = {"+": "+", "-": "-", "*": "×", "/": "÷"}[op]
     prompt = f"What is {a} {op_word} {b}?"
     return prompt, str(result)
 
@@ -48,19 +48,19 @@ def generate_algebra():
     templates = [
         lambda: (
             f"Solve for x: {(a := random.randint(2, 10))}x + {(b := random.randint(1, 20))} = {(c := a * random.randint(1, 10) + b)}",
-            str((c - b) // a)
+            str((c - b) // a),
         ),
         lambda: (
             f"Solve for x: {(a := random.randint(2, 8))}x - {(b := random.randint(1, 15))} = {(c := a * random.randint(1, 10) - b)}",
-            str((c + b) // a)
+            str((c + b) // a),
         ),
         lambda: (
             f"If x + {(a := random.randint(1, 20))} = {(b := random.randint(a + 1, 50))}, what is x?",
-            str(b - a)
+            str(b - a),
         ),
         lambda: (
             f"If {(a := random.randint(2, 5))}x = {(b := a * random.randint(2, 20))}, what is x?",
-            str(b // a)
+            str(b // a),
         ),
     ]
     return random.choice(templates)()
@@ -72,27 +72,27 @@ def generate_word_problem():
         lambda: (
             f"A store sells apples for ${(p := random.randint(1, 5))} each. "
             f"If you buy {(n := random.randint(3, 20))} apples, how much do you pay in total?",
-            str(p * n)
+            str(p * n),
         ),
         lambda: (
             f"A train travels at {(s := random.randint(40, 120))} km/h. "
             f"How far does it travel in {(t := random.randint(2, 8))} hours?",
-            str(s * t)
+            str(s * t),
         ),
         lambda: (
             f"You have {(total := random.randint(50, 200))} books and want to put them equally "
             f"on {(shelves := random.choice([5, 10, 20, 25]))} shelves. How many books per shelf?",
-            str(total // shelves)
+            str(total // shelves),
         ),
         lambda: (
-            f"A rectangle has a length of {(l := random.randint(5, 30))} cm and a width of "
+            f"A rectangle has a length of {(length := random.randint(5, 30))} cm and a width of "
             f"{(w := random.randint(3, 20))} cm. What is its area in square centimeters?",
-            str(l * w)
+            str(length * w),
         ),
         lambda: (
             f"There are {(g := random.randint(5, 30))} girls and {(b := random.randint(5, 30))} boys "
             f"in a class. How many students are there in total?",
-            str(g + b)
+            str(g + b),
         ),
     ]
     return random.choice(templates)()
@@ -114,11 +114,11 @@ def generate_comparison():
     templates = [
         lambda: (
             f"Which is larger: {(a := random.randint(100, 10000))} or {(b := random.randint(100, 10000))}?",
-            str(max(a, b))
+            str(max(a, b)),
         ),
         lambda: (
             f"What is the remainder when {(a := random.randint(50, 500))} is divided by {(b := random.randint(3, 20))}?",
-            str(a % b)
+            str(a % b),
         ),
     ]
     return random.choice(templates)()
@@ -144,8 +144,12 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=str, default="data/grpo_prompts.jsonl")
     parser.add_argument("--num", type=int, default=2000)
-    parser.add_argument("--include_reasoning", action="store_true", default=False,
-                        help="Include open-ended reasoning prompts (no reference answer)")
+    parser.add_argument(
+        "--include_reasoning",
+        action="store_true",
+        default=False,
+        help="Include open-ended reasoning prompts (no reference answer)",
+    )
     args = parser.parse_args()
 
     generators = [

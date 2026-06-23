@@ -18,8 +18,11 @@ jobs:
       - name: Install basic dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pytest ruff black
+          pip install ruff black pytest
           pip install torch datasets tiktoken tqdm
+
+      - name: Format check
+        run: black --check .
 
       - name: Lint
         run: ruff check .
@@ -32,5 +35,18 @@ jobs:
           python -m py_compile reward_model.py
           python -m py_compile ppo.py
           python -m py_compile grpo.py
+          python -m py_compile multimodal_train.py
           python -m py_compile generate_sample_data.py
           python -m py_compile generate_grpo_data.py
+
+      - name: Unit tests
+        run: pytest -q
+
+      - name: Stage smoke examples
+        run: |
+          bash examples/pretrain_smoke.sh
+          bash examples/sft_smoke.sh
+          bash examples/dpo_smoke.sh
+          bash examples/reward_model_smoke.sh
+          bash examples/ppo_smoke.sh
+          bash examples/grpo_smoke.sh

@@ -25,20 +25,27 @@ Data format (JSONL):
 
 import argparse
 import json
-import math
 import os
 import time
 from contextlib import nullcontext
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Tuple
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import deepspeed
 from torch.utils.data import Dataset
 
-import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import DelayedScaling, Format
+try:
+    import deepspeed
+except ImportError:  # pragma: no cover - optional distributed dependency
+    deepspeed = None
+
+try:
+    import transformer_engine.pytorch as te
+    from transformer_engine.common.recipe import DelayedScaling, Format
+except ImportError:  # pragma: no cover - optional GPU dependency
+    te = None
+    DelayedScaling = None
+    Format = None
 
 from train import GPTModel, ModelConfig
 from sft import ChatTokenizer, apply_lora
@@ -142,7 +149,9 @@ def get_batch_logps(
     shift_mask = loss_mask[:, 1:].contiguous()
 
     log_probs = F.log_softmax(shift_logits, dim=-1)
-    per_token_logps = log_probs.gather(2, shift_labels.unsqueeze(2)).squeeze(2)  # (B, S-1)
+    per_token_logps = log_probs.gather(2, shift_labels.unsqueeze(2)).squeeze(
+        2
+    )  # (B, S-1)
 
     # Mask and sum
     masked_logps = per_token_logps * shift_mask
@@ -162,7 +171,9 @@ def get_batch_logps(
 class DPODataset(Dataset):
     """Preference pairs for DPO training."""
 
-    def __init__(self, data_path: str, tokenizer: ChatTokenizer, max_seq_len: int = 2048):
+    def __init__(
+        self, data_path: str, tokenizer: ChatTokenizer, max_seq_len: int = 2048
+    ):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.pairs = []
@@ -185,9 +196,11 @@ class DPODataset(Dataset):
 
     def _encode(self, messages):
         encoded = self.tokenizer.encode_chat(messages)
-        ids = encoded["input_ids"][:self.max_seq_len]
-        mask = encoded["loss_mask"][:self.max_seq_len]
-        return torch.tensor(ids, dtype=torch.long), torch.tensor(mask, dtype=torch.float)
+        ids = encoded["input_ids"][: self.max_seq_len]
+        mask = encoded["loss_mask"][: self.max_seq_len]
+        return torch.tensor(ids, dtype=torch.long), torch.tensor(
+            mask, dtype=torch.float
+        )
 
     def __getitem__(self, idx):
         chosen_msgs, rejected_msgs = self.pairs[idx]
@@ -217,7 +230,10 @@ class DPOCollator:
             self.max_seq_len,
         )
 
-        for key_ids, key_mask in [("chosen_ids", "chosen_mask"), ("rejected_ids", "rejected_mask")]:
+        for key_ids, key_mask in [
+            ("chosen_ids", "chosen_mask"),
+            ("rejected_ids", "rejected_mask"),
+        ]:
             for b in batch:
                 ids = b[key_ids][:max_len]
                 mask = b[key_mask][:max_len]
@@ -227,8 +243,10 @@ class DPOCollator:
 
         B = len(batch)
         return {
-            "input_ids": torch.stack(all_ids),       # (2B, S) - first B chosen, last B rejected
-            "loss_mask": torch.stack(all_masks),      # (2B, S)
+            "input_ids": torch.stack(
+                all_ids
+            ),  # (2B, S) - first B chosen, last B rejected
+            "loss_mask": torch.stack(all_masks),  # (2B, S)
             "n_chosen": B,
         }
 
@@ -237,6 +255,9 @@ class DPOCollator:
 # Training
 # =============================================================================
 def train_dpo(args):
+    if deepspeed is None:
+        raise ImportError("DeepSpeed is required for DPO training.")
+
     deepspeed.init_distributed()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     global_rank = int(os.environ.get("RANK", 0))
@@ -250,7 +271,7 @@ def train_dpo(args):
         "1.3b": dict(n_layers=24, n_heads=32, d_model=2048),
         "2.7b": dict(n_layers=32, n_heads=32, d_model=2560),
         "6.7b": dict(n_layers=32, n_heads=32, d_model=4096),
-        "13b":  dict(n_layers=40, n_heads=40, d_model=5120),
+        "13b": dict(n_layers=40, n_heads=40, d_model=5120),
     }
 
     model_kwargs = MODEL_CONFIGS.get(args.model_size, MODEL_CONFIGS["350m"])
@@ -318,7 +339,9 @@ def train_dpo(args):
     # FP8
     fp8_ctx = nullcontext()
     if args.use_te and args.fp8:
-        fp8_recipe = DelayedScaling(fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max")
+        fp8_recipe = DelayedScaling(
+            fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max"
+        )
         fp8_ctx = te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe)
 
     # DeepSpeed init
@@ -345,7 +368,7 @@ def train_dpo(args):
         print(f"LoRA: {args.use_lora}")
         print(f"{'='*70}\n")
 
-    use_avg_logp = (args.loss_type == "simpo")
+    use_avg_logp = args.loss_type == "simpo"
     data_iter = iter(train_loader)
 
     while step < args.max_steps:
@@ -363,14 +386,18 @@ def train_dpo(args):
             # Policy forward (chosen + rejected concatenated)
             policy_logits, _ = model_engine(input_ids)
 
-        policy_logps = get_batch_logps(policy_logits, input_ids, loss_mask, average_log_prob=use_avg_logp)
+        policy_logps = get_batch_logps(
+            policy_logits, input_ids, loss_mask, average_log_prob=use_avg_logp
+        )
         policy_chosen_logps = policy_logps[:n_chosen]
         policy_rejected_logps = policy_logps[n_chosen:]
 
         # Reference forward
         with torch.no_grad():
             ref_logits, _ = ref_model(input_ids)
-            ref_logps = get_batch_logps(ref_logits, input_ids, loss_mask, average_log_prob=use_avg_logp)
+            ref_logps = get_batch_logps(
+                ref_logits, input_ids, loss_mask, average_log_prob=use_avg_logp
+            )
             ref_chosen_logps = ref_logps[:n_chosen]
             ref_rejected_logps = ref_logps[n_chosen:]
 
@@ -406,13 +433,18 @@ def train_dpo(args):
 
             try:
                 import wandb
+
                 if wandb.run:
-                    wandb.log({f"dpo/{k}": v for k, v in avg.items()} | {"dpo/step": step})
+                    wandb.log(
+                        {f"dpo/{k}": v for k, v in avg.items()} | {"dpo/step": step}
+                    )
             except ImportError:
                 pass
 
         if args.save_interval > 0 and step % args.save_interval == 0:
-            model_engine.save_checkpoint(os.path.join(args.save_dir, f"dpo_step_{step}"))
+            model_engine.save_checkpoint(
+                os.path.join(args.save_dir, f"dpo_step_{step}")
+            )
 
     # Save
     if args.save_dir:
@@ -427,7 +459,9 @@ def parse_args():
 
     # Model
     parser.add_argument("--model_size", type=str, default="350m")
-    parser.add_argument("--base_model", type=str, default=None, help="Path to SFT checkpoint")
+    parser.add_argument(
+        "--base_model", type=str, default=None, help="Path to SFT checkpoint"
+    )
     parser.add_argument("--seq_len", type=int, default=2048)
     parser.add_argument("--dropout", type=float, default=0.0)
 
@@ -436,21 +470,31 @@ def parse_args():
     parser.add_argument("--no_flash_attn", action="store_false", dest="use_flash_attn")
     parser.add_argument("--use_te", action="store_true", default=True)
     parser.add_argument("--no_te", action="store_false", dest="use_te")
-    parser.add_argument("--use_flash_attn_3", action="store_true", default=False,
-                        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)")
+    parser.add_argument(
+        "--use_flash_attn_3",
+        action="store_true",
+        default=False,
+        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)",
+    )
     parser.add_argument("--fp8", action="store_true", default=False)
 
     # DPO
-    parser.add_argument("--loss_type", type=str, default="dpo", choices=["dpo", "ipo", "simpo"])
+    parser.add_argument(
+        "--loss_type", type=str, default="dpo", choices=["dpo", "ipo", "simpo"]
+    )
     parser.add_argument("--beta", type=float, default=0.1, help="DPO temperature")
-    parser.add_argument("--label_smoothing", type=float, default=0.0, help="cDPO label smoothing")
+    parser.add_argument(
+        "--label_smoothing", type=float, default=0.0, help="cDPO label smoothing"
+    )
 
     # LoRA
     parser.add_argument("--use_lora", action="store_true", default=False)
     parser.add_argument("--lora_rank", type=int, default=16)
     parser.add_argument("--lora_alpha", type=float, default=32.0)
     parser.add_argument("--lora_dropout", type=float, default=0.05)
-    parser.add_argument("--lora_targets", type=str, default="q_proj,k_proj,v_proj,o_proj")
+    parser.add_argument(
+        "--lora_targets", type=str, default="q_proj,k_proj,v_proj,o_proj"
+    )
 
     # Data
     parser.add_argument("--data_path", type=str, required=True)

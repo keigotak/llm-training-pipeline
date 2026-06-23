@@ -20,21 +20,29 @@ Data format (JSONL):
 
 import argparse
 import json
-import math
 import os
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import deepspeed
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
-import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import DelayedScaling, Format
+try:
+    import deepspeed
+except ImportError:  # pragma: no cover - optional distributed dependency
+    deepspeed = None
+
+try:
+    import transformer_engine.pytorch as te
+    from transformer_engine.common.recipe import DelayedScaling, Format
+except ImportError:  # pragma: no cover - optional GPU dependency
+    te = None
+    DelayedScaling = None
+    Format = None
 
 from train import GPTModel, ModelConfig
 from sft import ChatTokenizer
@@ -58,9 +66,9 @@ class PPOConfig:
     vf_coef: float = 0.1
     entropy_coef: float = 0.01
     gamma: float = 1.0
-    lam: float = 0.95             # GAE lambda
-    kl_coef: float = 0.05         # KL penalty coefficient
-    kl_target: float = 6.0        # Target KL for adaptive coefficient
+    lam: float = 0.95  # GAE lambda
+    kl_coef: float = 0.05  # KL penalty coefficient
+    kl_target: float = 6.0  # Target KL for adaptive coefficient
     kl_horizon: int = 10000
     max_grad_norm: float = 1.0
 
@@ -118,7 +126,9 @@ def generate(
 
         probs = F.softmax(next_logits, dim=-1)
         next_token = torch.multinomial(probs, num_samples=1)  # (B, 1)
-        token_log_prob = F.log_softmax(next_logits, dim=-1).gather(1, next_token)  # (B, 1)
+        token_log_prob = F.log_softmax(next_logits, dim=-1).gather(
+            1, next_token
+        )  # (B, 1)
 
         # Mask finished sequences
         next_token = next_token.squeeze(-1)
@@ -140,15 +150,21 @@ def generate(
 
 
 @torch.no_grad()
-def compute_log_probs(model: nn.Module, input_ids: torch.Tensor, response_start: int) -> torch.Tensor:
+def compute_log_probs(
+    model: nn.Module, input_ids: torch.Tensor, response_start: int
+) -> torch.Tensor:
     """Compute per-token log probs for the response portion."""
     logits, _ = model(input_ids)
     log_probs = F.log_softmax(logits, dim=-1)
 
     # Gather log probs for actual tokens (shifted by 1)
-    response_logits = log_probs[:, response_start - 1:-1, :]  # predict tokens at response_start onwards
+    response_logits = log_probs[
+        :, response_start - 1 : -1, :
+    ]  # predict tokens at response_start onwards
     response_tokens = input_ids[:, response_start:]
-    token_log_probs = response_logits.gather(2, response_tokens.unsqueeze(-1)).squeeze(-1)
+    token_log_probs = response_logits.gather(2, response_tokens.unsqueeze(-1)).squeeze(
+        -1
+    )
 
     return token_log_probs
 
@@ -215,7 +231,9 @@ class PolicyWithValueHead(nn.Module):
 # Prompt Dataset
 # =============================================================================
 class PromptDataset(Dataset):
-    def __init__(self, data_path: str, tokenizer: ChatTokenizer, max_prompt_len: int = 512):
+    def __init__(
+        self, data_path: str, tokenizer: ChatTokenizer, max_prompt_len: int = 512
+    ):
         self.tokenizer = tokenizer
         self.max_prompt_len = max_prompt_len
         self.prompts = []
@@ -240,7 +258,7 @@ class PromptDataset(Dataset):
     def __getitem__(self, idx):
         messages = self.prompts[idx]
         encoded = self.tokenizer.encode_chat(messages)
-        ids = encoded["input_ids"][:self.max_prompt_len]
+        ids = encoded["input_ids"][: self.max_prompt_len]
         return {"input_ids": torch.tensor(ids, dtype=torch.long)}
 
 
@@ -294,7 +312,9 @@ class PPOTrainer:
 
         # 3. Compute rewards
         rewards_raw = self.reward_model(full_ids)  # (B,) scalar per sequence
-        rewards_raw = rewards_raw.clamp(-self.config.reward_clip, self.config.reward_clip)
+        rewards_raw = rewards_raw.clamp(
+            -self.config.reward_clip, self.config.reward_clip
+        )
 
         # Distribute reward to last token
         per_token_rewards = torch.zeros(prompt_ids.shape[0], gen_len, device=device)
@@ -305,11 +325,12 @@ class PPOTrainer:
         per_token_rewards = per_token_rewards - self.kl_coef * kl_div
 
         # 5. Value estimates
-        values = policy_model.get_values(full_ids)[:, prompt_len:prompt_len + gen_len]
+        values = policy_model.get_values(full_ids)[:, prompt_len : prompt_len + gen_len]
 
         # 6. GAE
         advantages, returns = compute_gae(
-            per_token_rewards, values,
+            per_token_rewards,
+            values,
             gamma=self.config.gamma,
             lam=self.config.lam,
         )
@@ -364,30 +385,42 @@ class PPOTrainer:
                     # New log probs
                     logits, _ = self.policy_engine(mb_ids)
                     new_log_probs = F.log_softmax(logits, dim=-1)
-                    response_logprobs = new_log_probs[:, prompt_len - 1:prompt_len - 1 + gen_len, :]
-                    response_tokens = mb_ids[:, prompt_len:prompt_len + gen_len]
-                    new_lp = response_logprobs.gather(2, response_tokens.unsqueeze(-1)).squeeze(-1)
+                    response_logprobs = new_log_probs[
+                        :, prompt_len - 1 : prompt_len - 1 + gen_len, :
+                    ]
+                    response_tokens = mb_ids[:, prompt_len : prompt_len + gen_len]
+                    new_lp = response_logprobs.gather(
+                        2, response_tokens.unsqueeze(-1)
+                    ).squeeze(-1)
 
                     # New values
                     new_values = self.policy_engine.module.get_values(mb_ids)
-                    new_values = new_values[:, prompt_len:prompt_len + gen_len]
+                    new_values = new_values[:, prompt_len : prompt_len + gen_len]
 
                     # Ratio
                     ratio = (new_lp - mb_old_lp).exp()
 
                     # Clipped surrogate objective
                     pg_loss1 = -mb_adv * ratio
-                    pg_loss2 = -mb_adv * ratio.clamp(1 - self.config.clip_eps, 1 + self.config.clip_eps)
+                    pg_loss2 = -mb_adv * ratio.clamp(
+                        1 - self.config.clip_eps, 1 + self.config.clip_eps
+                    )
                     pg_loss = torch.max(pg_loss1, pg_loss2).mean()
 
                     # Value loss (clipped)
                     vf_loss = 0.5 * (new_values - mb_ret).pow(2).mean()
 
                     # Entropy bonus
-                    probs = F.softmax(logits[:, prompt_len - 1:prompt_len - 1 + gen_len, :], dim=-1)
+                    probs = F.softmax(
+                        logits[:, prompt_len - 1 : prompt_len - 1 + gen_len, :], dim=-1
+                    )
                     entropy = -(probs * probs.log().clamp(min=-100)).sum(-1).mean()
 
-                    loss = pg_loss + self.config.vf_coef * vf_loss - self.config.entropy_coef * entropy
+                    loss = (
+                        pg_loss
+                        + self.config.vf_coef * vf_loss
+                        - self.config.entropy_coef * entropy
+                    )
 
                 self.policy_engine.backward(loss)
                 self.policy_engine.step()
@@ -423,9 +456,11 @@ class PromptCollator:
         self.max_len = max_len
 
     def __call__(self, batch):
-        ids_list = [b["input_ids"][:self.max_len] for b in batch]
+        ids_list = [b["input_ids"][: self.max_len] for b in batch]
         max_len = max(len(ids) for ids in ids_list)
-        padded = [F.pad(ids, (0, max_len - len(ids)), value=self.pad_id) for ids in ids_list]
+        padded = [
+            F.pad(ids, (0, max_len - len(ids)), value=self.pad_id) for ids in ids_list
+        ]
         return {"input_ids": torch.stack(padded)}
 
 
@@ -433,6 +468,9 @@ class PromptCollator:
 # Main Training
 # =============================================================================
 def train_ppo(args):
+    if deepspeed is None:
+        raise ImportError("DeepSpeed is required for PPO training.")
+
     deepspeed.init_distributed()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     global_rank = int(os.environ.get("RANK", 0))
@@ -453,7 +491,7 @@ def train_ppo(args):
         "1.3b": dict(n_layers=24, n_heads=32, d_model=2048),
         "2.7b": dict(n_layers=32, n_heads=32, d_model=2560),
         "6.7b": dict(n_layers=32, n_heads=32, d_model=4096),
-        "13b":  dict(n_layers=40, n_heads=40, d_model=5120),
+        "13b": dict(n_layers=40, n_heads=40, d_model=5120),
     }
 
     model_kwargs = MODEL_CONFIGS.get(args.model_size, MODEL_CONFIGS["350m"])
@@ -506,13 +544,17 @@ def train_ppo(args):
     # Dataset
     # -------------------------------------------------------------------------
     tokenizer = ChatTokenizer(encoding_name="gpt2")
-    dataset = PromptDataset(args.data_path, tokenizer, max_prompt_len=args.max_prompt_len)
+    dataset = PromptDataset(
+        args.data_path, tokenizer, max_prompt_len=args.max_prompt_len
+    )
     collator = PromptCollator(pad_id=tokenizer.pad_id, max_len=args.max_prompt_len)
 
     # FP8
     fp8_ctx = nullcontext()
     if args.use_te and args.fp8:
-        fp8_recipe = DelayedScaling(fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max")
+        fp8_recipe = DelayedScaling(
+            fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max"
+        )
         fp8_ctx = te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe)
 
     # DeepSpeed init (policy only)
@@ -586,21 +628,26 @@ def train_ppo(args):
 
             try:
                 import wandb
+
                 if wandb.run:
-                    wandb.log({
-                        "ppo/reward": avg_reward,
-                        "ppo/kl": kl_val,
-                        "ppo/kl_coef": trainer.kl_coef,
-                        "ppo/pg_loss": ppo_metrics["pg_loss"],
-                        "ppo/vf_loss": ppo_metrics["vf_loss"],
-                        "ppo/entropy": ppo_metrics["entropy"],
-                        "ppo/step": step,
-                    })
+                    wandb.log(
+                        {
+                            "ppo/reward": avg_reward,
+                            "ppo/kl": kl_val,
+                            "ppo/kl_coef": trainer.kl_coef,
+                            "ppo/pg_loss": ppo_metrics["pg_loss"],
+                            "ppo/vf_loss": ppo_metrics["vf_loss"],
+                            "ppo/entropy": ppo_metrics["entropy"],
+                            "ppo/step": step,
+                        }
+                    )
             except ImportError:
                 pass
 
         if args.save_interval > 0 and step % args.save_interval == 0:
-            model_engine.save_checkpoint(os.path.join(args.save_dir, f"ppo_step_{step}"))
+            model_engine.save_checkpoint(
+                os.path.join(args.save_dir, f"ppo_step_{step}")
+            )
 
     # Save
     if args.save_dir:
@@ -613,8 +660,15 @@ def train_ppo(args):
 def parse_args():
     parser = argparse.ArgumentParser(description="PPO (RLHF) Training")
     parser.add_argument("--model_size", type=str, default="350m")
-    parser.add_argument("--policy_model", type=str, required=True, help="Path to SFT checkpoint")
-    parser.add_argument("--reward_model", type=str, required=True, help="Path to reward model checkpoint")
+    parser.add_argument(
+        "--policy_model", type=str, required=True, help="Path to SFT checkpoint"
+    )
+    parser.add_argument(
+        "--reward_model",
+        type=str,
+        required=True,
+        help="Path to reward model checkpoint",
+    )
     parser.add_argument("--seq_len", type=int, default=2048)
     parser.add_argument("--max_prompt_len", type=int, default=512)
     parser.add_argument("--max_new_tokens", type=int, default=256)
@@ -622,8 +676,12 @@ def parse_args():
     parser.add_argument("--no_flash_attn", action="store_false", dest="use_flash_attn")
     parser.add_argument("--use_te", action="store_true", default=True)
     parser.add_argument("--no_te", action="store_false", dest="use_te")
-    parser.add_argument("--use_flash_attn_3", action="store_true", default=False,
-                        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)")
+    parser.add_argument(
+        "--use_flash_attn_3",
+        action="store_true",
+        default=False,
+        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)",
+    )
     parser.add_argument("--fp8", action="store_true", default=False)
     parser.add_argument("--data_path", type=str, required=True)
     parser.add_argument("--max_steps", type=int, default=1000)

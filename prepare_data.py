@@ -15,7 +15,9 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 
-def tokenize_with_tiktoken(dataset, encoding_name: str, text_key: str, max_tokens: int = None):
+def tokenize_with_tiktoken(
+    dataset, encoding_name: str, text_key: str, max_tokens: int = None
+):
     """Tokenize dataset using tiktoken (fast BPE)."""
     enc = tiktoken.get_encoding(encoding_name)
     all_tokens = []
@@ -38,17 +40,31 @@ def tokenize_with_tiktoken(dataset, encoding_name: str, text_key: str, max_token
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", type=str, required=True, help="HuggingFace dataset name")
+    parser.add_argument(
+        "--dataset", type=str, required=True, help="HuggingFace dataset name"
+    )
     parser.add_argument("--subset", type=str, default=None)
     parser.add_argument("--split", type=str, default="train")
     parser.add_argument("--text_key", type=str, default="text")
-    parser.add_argument("--tokenizer", type=str, default="gpt2",
-                        choices=["gpt2", "cl100k_base", "o200k_base"])
-    parser.add_argument("--max_tokens", type=int, default=None,
-                        help="Max tokens to process (None = all)")
+    parser.add_argument(
+        "--tokenizer",
+        type=str,
+        default="gpt2",
+        choices=["gpt2", "cl100k_base", "o200k_base"],
+    )
+    parser.add_argument(
+        "--max_tokens",
+        type=int,
+        default=None,
+        help="Max tokens to process (None = all)",
+    )
     parser.add_argument("--output", type=str, required=True)
-    parser.add_argument("--streaming", action="store_true", default=False,
-                        help="Use streaming mode for large datasets")
+    parser.add_argument(
+        "--streaming",
+        action="store_true",
+        default=False,
+        help="Use streaming mode for large datasets",
+    )
     args = parser.parse_args()
 
     print(f"Loading dataset: {args.dataset}")
