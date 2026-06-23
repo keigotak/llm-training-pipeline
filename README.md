@@ -1,5 +1,5 @@
 # LLM Training Pipeline
-Research-oriented implementation of a modern LLM training and post-training stack in PyTorch.
+Research-oriented PyTorch implementation of LLM pretraining, SFT, preference optimization, and RLHF-style post-training.
 This repository explores the major stages of contemporary language model development:
 - Decoder-only language model pre-training
 - Supervised fine-tuning (SFT)
@@ -28,7 +28,7 @@ Evaluation / Iteration
 
 I built this repository as an independent research and engineering project to deepen my understanding of modern LLM training systems, especially the transition from base models to instruction-following and preference-optimized models.
 
-My professional work includes domain-specific language models, evaluation workflows, and agentic AI systems. This repository serves as a compact environment for exploring the algorithmic and engineering foundations behind those systems.
+My professional work includes biology-facing biomedical language models, scientific evidence synthesis workflows, evaluation pipelines, and agentic AI systems. This repository serves as a compact environment for exploring the algorithmic and engineering foundations behind modern LLM training and post-training systems.
 
 ⸻
 
