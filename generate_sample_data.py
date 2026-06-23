@@ -11,12 +11,19 @@ import json
 import os
 import random
 
-
 SAMPLE_TOPICS = [
-    "quantum computing", "climate change", "machine learning",
-    "space exploration", "renewable energy", "blockchain",
-    "genetics", "artificial intelligence", "cybersecurity",
-    "robotics", "neuroscience", "sustainable farming",
+    "quantum computing",
+    "climate change",
+    "machine learning",
+    "space exploration",
+    "renewable energy",
+    "blockchain",
+    "genetics",
+    "artificial intelligence",
+    "cybersecurity",
+    "robotics",
+    "neuroscience",
+    "sustainable farming",
 ]
 
 SAMPLE_QUESTIONS = [
@@ -36,7 +43,6 @@ SAMPLE_GOOD_ANSWERS = [
     "2. Recent breakthroughs have made significant progress.\n"
     "3. The potential applications are wide-ranging.\n\n"
     "The field continues to evolve rapidly with new discoveries.",
-
     "Great question about {topic}! Let me break it down:\n\n"
     "At its core, {topic} deals with fundamental challenges in technology and science. "
     "Researchers have been working on this for decades, and recent advances in computing "
@@ -60,7 +66,10 @@ def generate_sft_data(num_examples: int = 1000) -> list:
         answer = random.choice(SAMPLE_GOOD_ANSWERS).format(topic=topic)
 
         messages = [
-            {"role": "system", "content": "You are a helpful, knowledgeable assistant."},
+            {
+                "role": "system",
+                "content": "You are a helpful, knowledgeable assistant.",
+            },
             {"role": "user", "content": question},
             {"role": "assistant", "content": answer},
         ]
@@ -75,10 +84,12 @@ def generate_sft_data(num_examples: int = 1000) -> list:
                 f"For consumers, it leads to better products and services.\n\n"
                 f"The key is understanding how to bridge theory and practice."
             )
-            messages.extend([
-                {"role": "user", "content": followup},
-                {"role": "assistant", "content": followup_answer},
-            ])
+            messages.extend(
+                [
+                    {"role": "user", "content": followup},
+                    {"role": "assistant", "content": followup_answer},
+                ]
+            )
 
         examples.append({"messages": messages})
     return examples

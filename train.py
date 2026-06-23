@@ -19,23 +19,37 @@ from typing import Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import deepspeed
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
-# Transformer Engine (FP8 mixed precision)
-import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import DelayedScaling, Format
+try:
+    import deepspeed
+except ImportError:  # pragma: no cover - exercised in CPU-only CI imports
+    deepspeed = None
 
-# Flash Attention 2
-from flash_attn import flash_attn_func
+try:
+    # Transformer Engine (FP8 mixed precision)
+    import transformer_engine.pytorch as te
+    from transformer_engine.common.recipe import DelayedScaling, Format
+except ImportError:  # pragma: no cover - optional GPU dependency
+    te = None
+    DelayedScaling = None
+    Format = None
+
+try:
+    # Flash Attention 2
+    from flash_attn import flash_attn_func
+except ImportError:  # pragma: no cover - optional GPU dependency
+    flash_attn_func = None
 
 # Flash Attention 3 (loaded lazily via kernels library)
 _fa3_module = None
+
 
 def _get_fa3():
     global _fa3_module
     if _fa3_module is None:
         from kernels import get_kernel
+
         _fa3_module = get_kernel("kernels-community/flash-attn3")
     return _fa3_module
 
@@ -45,19 +59,19 @@ def _get_fa3():
 # =============================================================================
 @dataclass
 class ModelConfig:
-    vocab_size: int = 50304       # GPT-2 vocab size (padded for efficiency)
+    vocab_size: int = 50304  # GPT-2 vocab size (padded for efficiency)
     max_seq_len: int = 2048
     n_layers: int = 24
     n_heads: int = 16
     n_kv_heads: Optional[int] = None  # None = MHA, else GQA
     d_model: int = 1024
-    d_ff: Optional[int] = None        # None = 4 * d_model
+    d_ff: Optional[int] = None  # None = 4 * d_model
     dropout: float = 0.0
     bias: bool = False
     rope_theta: float = 10000.0
     use_flash_attn: bool = True
-    use_flash_attn_3: bool = False    # Flash Attention 3 via kernels (Hopper GPU)
-    use_te: bool = True               # Use Transformer Engine layers
+    use_flash_attn_3: bool = False  # Flash Attention 3 via kernels (Hopper GPU)
+    use_te: bool = True  # Use Transformer Engine layers
 
     def __post_init__(self):
         if self.d_ff is None:
@@ -91,8 +105,8 @@ def apply_rotary_emb(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor):
     """Apply RoPE to query/key tensors. x: (B, n_heads, S, head_dim)"""
     d = x.shape[-1] // 2
     x1, x2 = x[..., :d], x[..., d:]
-    cos = cos[:x.shape[2]].unsqueeze(0).unsqueeze(0)
-    sin = sin[:x.shape[2]].unsqueeze(0).unsqueeze(0)
+    cos = cos[: x.shape[2]].unsqueeze(0).unsqueeze(0)
+    sin = sin[: x.shape[2]].unsqueeze(0).unsqueeze(0)
     out = torch.cat([x1 * cos - x2 * sin, x2 * cos + x1 * sin], dim=-1)
     return out
 
@@ -110,12 +124,22 @@ class GQAFlashAttention(nn.Module):
         self.use_flash = config.use_flash_attn
         self.use_flash_3 = config.use_flash_attn_3
 
-        self.q_proj = nn.Linear(config.d_model, config.n_heads * config.head_dim, bias=config.bias)
-        self.k_proj = nn.Linear(config.d_model, config.n_kv_heads * config.head_dim, bias=config.bias)
-        self.v_proj = nn.Linear(config.d_model, config.n_kv_heads * config.head_dim, bias=config.bias)
-        self.o_proj = nn.Linear(config.n_heads * config.head_dim, config.d_model, bias=config.bias)
+        self.q_proj = nn.Linear(
+            config.d_model, config.n_heads * config.head_dim, bias=config.bias
+        )
+        self.k_proj = nn.Linear(
+            config.d_model, config.n_kv_heads * config.head_dim, bias=config.bias
+        )
+        self.v_proj = nn.Linear(
+            config.d_model, config.n_kv_heads * config.head_dim, bias=config.bias
+        )
+        self.o_proj = nn.Linear(
+            config.n_heads * config.head_dim, config.d_model, bias=config.bias
+        )
 
-        self.rotary = RotaryEmbedding(config.head_dim, config.max_seq_len, config.rope_theta)
+        self.rotary = RotaryEmbedding(
+            config.head_dim, config.max_seq_len, config.rope_theta
+        )
         self.attn_dropout = config.dropout
 
         # Load Flash Attention 3 kernel
@@ -139,22 +163,24 @@ class GQAFlashAttention(nn.Module):
 
         if self.use_flash_3:
             # Flash Attention 3: native GQA via pack_gqa (no KV expansion needed)
-            q = q.transpose(1, 2).contiguous()   # (B, S, n_heads, D)
-            k = k.transpose(1, 2).contiguous()   # (B, S, n_kv_heads, D)
-            v = v.contiguous()                    # (B, S, n_kv_heads, D)
+            q = q.transpose(1, 2).contiguous()  # (B, S, n_heads, D)
+            k = k.transpose(1, 2).contiguous()  # (B, S, n_kv_heads, D)
+            v = v.contiguous()  # (B, S, n_kv_heads, D)
             attn_out = self.fa3_func(q, k, v, causal=True, pack_gqa=True)
-        elif self.use_flash:
+        elif self.use_flash and flash_attn_func is not None:
             # Flash Attention 2: expand KV for GQA, then use flash_attn_func
             if self.n_rep > 1:
                 k = k.repeat_interleave(self.n_rep, dim=1)
                 v = v.transpose(1, 2).repeat_interleave(self.n_rep, dim=1)
             else:
                 v = v.transpose(1, 2)
-            q = q.transpose(1, 2).contiguous()   # (B, S, n_heads, D)
-            k = k.transpose(1, 2).contiguous()   # (B, S, n_heads, D)
-            v = v.transpose(1, 2).contiguous()   # (B, S, n_heads, D)
+            q = q.transpose(1, 2).contiguous()  # (B, S, n_heads, D)
+            k = k.transpose(1, 2).contiguous()  # (B, S, n_heads, D)
+            v = v.transpose(1, 2).contiguous()  # (B, S, n_heads, D)
             attn_out = flash_attn_func(
-                q, k, v,
+                q,
+                k,
+                v,
                 dropout_p=self.attn_dropout if self.training else 0.0,
                 causal=True,
             )
@@ -166,7 +192,9 @@ class GQAFlashAttention(nn.Module):
             else:
                 v = v.transpose(1, 2)
             attn_out = F.scaled_dot_product_attention(
-                q, k, v,
+                q,
+                k,
+                v,
                 attn_mask=None,
                 dropout_p=self.attn_dropout if self.training else 0.0,
                 is_causal=True,
@@ -185,7 +213,7 @@ class TransformerBlock(nn.Module):
 
     def __init__(self, config: ModelConfig):
         super().__init__()
-        self.use_te = config.use_te
+        self.use_te = config.use_te and te is not None
 
         if self.use_te:
             # Transformer Engine's LayerNormMLP for FP8 acceleration
@@ -205,7 +233,9 @@ class TransformerBlock(nn.Module):
             self.norm2 = RMSNorm(config.d_model)
             self.ffn = SwiGLUFFN(config)
 
-        self.dropout = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
+        self.dropout = (
+            nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
+        )
 
     def forward(self, x: torch.Tensor):
         if self.use_te:
@@ -251,11 +281,11 @@ class GPTModel(nn.Module):
         self.tok_emb = nn.Embedding(config.vocab_size, config.d_model)
         self.drop = nn.Dropout(config.dropout) if config.dropout > 0 else nn.Identity()
 
-        self.layers = nn.ModuleList([
-            TransformerBlock(config) for _ in range(config.n_layers)
-        ])
+        self.layers = nn.ModuleList(
+            [TransformerBlock(config) for _ in range(config.n_layers)]
+        )
 
-        if config.use_te:
+        if config.use_te and te is not None:
             self.norm_f = te.RMSNorm(config.d_model)
         else:
             self.norm_f = RMSNorm(config.d_model)
@@ -363,7 +393,9 @@ def get_lr_scheduler(optimizer, warmup_steps, max_steps, min_lr_ratio=0.1):
         if step < warmup_steps:
             return step / max(1, warmup_steps)
         progress = (step - warmup_steps) / max(1, max_steps - warmup_steps)
-        return min_lr_ratio + 0.5 * (1.0 - min_lr_ratio) * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + 0.5 * (1.0 - min_lr_ratio) * (
+            1.0 + math.cos(math.pi * progress)
+        )
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
 
@@ -376,13 +408,16 @@ def log_metrics(step, loss, lr, throughput, elapsed, rank):
         )
         try:
             import wandb
+
             if wandb.run is not None:
-                wandb.log({
-                    "train/loss": loss,
-                    "train/lr": lr,
-                    "train/throughput": throughput,
-                    "train/step": step,
-                })
+                wandb.log(
+                    {
+                        "train/loss": loss,
+                        "train/lr": lr,
+                        "train/throughput": throughput,
+                        "train/step": step,
+                    }
+                )
         except ImportError:
             pass
 
@@ -391,6 +426,9 @@ def train(args):
     # -------------------------------------------------------------------------
     # Setup
     # -------------------------------------------------------------------------
+    if deepspeed is None:
+        raise ImportError("DeepSpeed is required for distributed pre-training.")
+
     deepspeed.init_distributed()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     global_rank = int(os.environ.get("RANK", 0))
@@ -399,7 +437,11 @@ def train(args):
 
     if global_rank == 0:
         print(f"World size: {world_size}")
-        attn_backend = "Flash Attention 3" if args.use_flash_attn_3 else f"Flash Attention 2: {args.use_flash_attn}"
+        attn_backend = (
+            "Flash Attention 3"
+            if args.use_flash_attn_3
+            else f"Flash Attention 2: {args.use_flash_attn}"
+        )
         print(f"Attention: {attn_backend}")
         print(f"Transformer Engine (FP8): {args.use_te}")
 
@@ -413,7 +455,7 @@ def train(args):
         "1.3b": dict(n_layers=24, n_heads=32, d_model=2048),
         "2.7b": dict(n_layers=32, n_heads=32, d_model=2560),
         "6.7b": dict(n_layers=32, n_heads=32, d_model=4096),
-        "13b":  dict(n_layers=40, n_heads=40, d_model=5120),
+        "13b": dict(n_layers=40, n_heads=40, d_model=5120),
     }
 
     model_kwargs = MODEL_CONFIGS.get(args.model_size, MODEL_CONFIGS["350m"])
@@ -469,9 +511,7 @@ def train(args):
 
     # Manual LR scheduler if DeepSpeed config doesn't define one
     if lr_scheduler is None and optimizer is not None:
-        lr_scheduler = get_lr_scheduler(
-            optimizer, args.warmup_steps, args.max_steps
-        )
+        lr_scheduler = get_lr_scheduler(optimizer, args.warmup_steps, args.max_steps)
 
     # -------------------------------------------------------------------------
     # Wandb
@@ -479,6 +519,7 @@ def train(args):
     if global_rank == 0 and args.wandb_project:
         try:
             import wandb
+
             wandb.init(project=args.wandb_project, config=vars(args))
         except ImportError:
             print("wandb not installed, skipping logging")
@@ -565,11 +606,17 @@ def train(args):
 # CLI
 # =============================================================================
 def parse_args():
-    parser = argparse.ArgumentParser(description="GPT Pre-training with DeepSpeed + Flash Attn + TE")
+    parser = argparse.ArgumentParser(
+        description="GPT Pre-training with DeepSpeed + Flash Attn + TE"
+    )
 
     # Model
-    parser.add_argument("--model_size", type=str, default="350m",
-                        choices=["125m", "350m", "760m", "1.3b", "2.7b", "6.7b", "13b"])
+    parser.add_argument(
+        "--model_size",
+        type=str,
+        default="350m",
+        choices=["125m", "350m", "760m", "1.3b", "2.7b", "6.7b", "13b"],
+    )
     parser.add_argument("--seq_len", type=int, default=2048)
     parser.add_argument("--dropout", type=float, default=0.0)
 
@@ -578,14 +625,23 @@ def parse_args():
     parser.add_argument("--no_flash_attn", action="store_false", dest="use_flash_attn")
     parser.add_argument("--use_te", action="store_true", default=True)
     parser.add_argument("--no_te", action="store_false", dest="use_te")
-    parser.add_argument("--use_flash_attn_3", action="store_true", default=False,
-                        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)")
-    parser.add_argument("--fp8", action="store_true", default=False,
-                        help="Enable FP8 training via Transformer Engine (requires Hopper GPU)")
+    parser.add_argument(
+        "--use_flash_attn_3",
+        action="store_true",
+        default=False,
+        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)",
+    )
+    parser.add_argument(
+        "--fp8",
+        action="store_true",
+        default=False,
+        help="Enable FP8 training via Transformer Engine (requires Hopper GPU)",
+    )
 
     # Data
-    parser.add_argument("--data_path", type=str, default=None,
-                        help="Path to pre-tokenized .pt file")
+    parser.add_argument(
+        "--data_path", type=str, default=None, help="Path to pre-tokenized .pt file"
+    )
 
     # Training
     parser.add_argument("--max_steps", type=int, default=10000)

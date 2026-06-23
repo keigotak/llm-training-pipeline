@@ -33,22 +33,30 @@ Data format (JSONL):
 
 import argparse
 import json
-import math
 import os
 import re
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import deepspeed
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 
-import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import DelayedScaling, Format
+try:
+    import deepspeed
+except ImportError:  # pragma: no cover - optional distributed dependency
+    deepspeed = None
+
+try:
+    import transformer_engine.pytorch as te
+    from transformer_engine.common.recipe import DelayedScaling, Format
+except ImportError:  # pragma: no cover - optional GPU dependency
+    te = None
+    DelayedScaling = None
+    Format = None
 
 from train import GPTModel, ModelConfig
 from sft import ChatTokenizer
@@ -60,25 +68,25 @@ from sft import ChatTokenizer
 @dataclass
 class GRPOConfig:
     # Group sampling
-    group_size: int = 8            # G: number of completions per prompt
+    group_size: int = 8  # G: number of completions per prompt
     max_new_tokens: int = 512
     temperature: float = 0.7
     top_p: float = 0.95
     top_k: int = 50
 
     # GRPO optimization
-    grpo_epochs: int = 1           # μ: number of optimization iterations per batch
-    mini_batch_size: int = 4       # Mini-batch size within each epoch
-    clip_eps: float = 0.2          # ε: PPO-style clipping
-    kl_coef: float = 0.04          # β: KL divergence penalty coefficient
-    kl_type: str = "kl"            # "kl" (standard) or "abs" (absolute)
+    grpo_epochs: int = 1  # μ: number of optimization iterations per batch
+    mini_batch_size: int = 4  # Mini-batch size within each epoch
+    clip_eps: float = 0.2  # ε: PPO-style clipping
+    kl_coef: float = 0.04  # β: KL divergence penalty coefficient
+    kl_type: str = "kl"  # "kl" (standard) or "abs" (absolute)
     max_grad_norm: float = 1.0
-    entropy_coef: float = 0.0      # Optional entropy bonus
+    entropy_coef: float = 0.0  # Optional entropy bonus
 
     # Reward
-    reward_type: str = "rule"      # "rule" (outcome-based) or "model" (reward model)
+    reward_type: str = "rule"  # "rule" (outcome-based) or "model" (reward model)
     reward_clip: float = 5.0
-    length_penalty: float = 0.0    # Penalty per token to encourage conciseness
+    length_penalty: float = 0.0  # Penalty per token to encourage conciseness
 
     # Adaptive KL
     kl_target: Optional[float] = None  # If set, adaptively adjust kl_coef
@@ -90,8 +98,12 @@ class GRPOConfig:
 class RewardFunction:
     """Base class for reward computation."""
 
-    def __call__(self, prompts: List[str], completions: List[str],
-                 references: List[Optional[str]]) -> torch.Tensor:
+    def __call__(
+        self,
+        prompts: List[str],
+        completions: List[str],
+        references: List[Optional[str]],
+    ) -> torch.Tensor:
         raise NotImplementedError
 
 
@@ -110,41 +122,44 @@ class RuleBasedReward(RewardFunction):
     def extract_answer(self, text: str) -> str:
         """Extract final answer from completion (handles various formats)."""
         # Try boxed format: \boxed{answer}
-        boxed = re.findall(r'\\boxed\{([^}]+)\}', text)
+        boxed = re.findall(r"\\boxed\{([^}]+)\}", text)
         if boxed:
             return boxed[-1].strip()
 
         # Try "The answer is X" format
         answer_match = re.search(
-            r'(?:the\s+)?(?:final\s+)?answer\s+is[:\s]*([^\n.]+)',
-            text, re.IGNORECASE
+            r"(?:the\s+)?(?:final\s+)?answer\s+is[:\s]*([^\n.]+)", text, re.IGNORECASE
         )
         if answer_match:
             return answer_match.group(1).strip()
 
         # Try <answer>X</answer> format
-        tag_match = re.search(r'<answer>(.*?)</answer>', text, re.DOTALL)
+        tag_match = re.search(r"<answer>(.*?)</answer>", text, re.DOTALL)
         if tag_match:
             return tag_match.group(1).strip()
 
         # Fall back to last line / last number
-        numbers = re.findall(r'-?\d+\.?\d*', text)
+        numbers = re.findall(r"-?\d+\.?\d*", text)
         if numbers:
             return numbers[-1]
 
-        return text.strip().split('\n')[-1].strip()
+        return text.strip().split("\n")[-1].strip()
 
     def check_format(self, text: str) -> float:
         """Check if output follows expected reasoning format."""
         score = 0.0
 
         # Reward for showing reasoning steps
-        has_think = bool(re.search(r'<think>.*?</think>', text, re.DOTALL))
+        has_think = bool(re.search(r"<think>.*?</think>", text, re.DOTALL))
         if has_think:
             score += 0.2
 
         # Reward for step-by-step markers
-        has_steps = bool(re.search(r'(?:step\s+\d|first|then|therefore|finally)', text, re.IGNORECASE))
+        has_steps = bool(
+            re.search(
+                r"(?:step\s+\d|first|then|therefore|finally)", text, re.IGNORECASE
+            )
+        )
         if has_steps:
             score += 0.1
 
@@ -154,9 +169,9 @@ class RuleBasedReward(RewardFunction):
         """Normalize answer string for comparison."""
         answer = answer.strip().lower()
         # Remove trailing punctuation
-        answer = re.sub(r'[.,;:!?]+$', '', answer)
+        answer = re.sub(r"[.,;:!?]+$", "", answer)
         # Normalize whitespace
-        answer = ' '.join(answer.split())
+        answer = " ".join(answer.split())
         # Try to parse as number
         try:
             num = float(answer)
@@ -166,8 +181,12 @@ class RuleBasedReward(RewardFunction):
         except ValueError:
             return answer
 
-    def __call__(self, prompts: List[str], completions: List[str],
-                 references: List[Optional[str]]) -> torch.Tensor:
+    def __call__(
+        self,
+        prompts: List[str],
+        completions: List[str],
+        references: List[Optional[str]],
+    ) -> torch.Tensor:
         rewards = []
         for prompt, completion, reference in zip(prompts, completions, references):
             reward = 0.0
@@ -221,8 +240,13 @@ class CompositeReward(RewardFunction):
 class RewardModelWrapper(RewardFunction):
     """Wraps a trained reward model for use as a reward function."""
 
-    def __init__(self, reward_model: nn.Module, tokenizer: ChatTokenizer,
-                 max_len: int = 2048, device: str = "cuda"):
+    def __init__(
+        self,
+        reward_model: nn.Module,
+        tokenizer: ChatTokenizer,
+        max_len: int = 2048,
+        device: str = "cuda",
+    ):
         self.model = reward_model
         self.tokenizer = tokenizer
         self.max_len = max_len
@@ -237,7 +261,7 @@ class RewardModelWrapper(RewardFunction):
                 {"role": "assistant", "content": completion},
             ]
             encoded = self.tokenizer.encode_chat(messages)
-            ids = torch.tensor(encoded["input_ids"][:self.max_len], dtype=torch.long)
+            ids = torch.tensor(encoded["input_ids"][: self.max_len], dtype=torch.long)
             ids = ids.unsqueeze(0).to(self.device)
             reward = self.model(ids)
             rewards.append(reward.item())
@@ -301,7 +325,11 @@ def generate_group(
 
         probs = F.softmax(next_logits, dim=-1)
         next_token = torch.multinomial(probs, num_samples=1).squeeze(-1)  # (BG,)
-        token_lp = F.log_softmax(next_logits, dim=-1).gather(1, next_token.unsqueeze(1)).squeeze(1)
+        token_lp = (
+            F.log_softmax(next_logits, dim=-1)
+            .gather(1, next_token.unsqueeze(1))
+            .squeeze(1)
+        )
 
         next_token[finished] = pad_token_id
         token_lp[finished] = 0.0
@@ -331,8 +359,8 @@ def compute_ref_log_probs(
     log_probs = F.log_softmax(logits, dim=-1)
 
     # Align: logits at position t predict token at t+1
-    response_lp = log_probs[:, prompt_len - 1:prompt_len - 1 + gen_len, :]
-    response_tokens = full_ids[:, prompt_len:prompt_len + gen_len]
+    response_lp = log_probs[:, prompt_len - 1 : prompt_len - 1 + gen_len, :]
+    response_tokens = full_ids[:, prompt_len : prompt_len + gen_len]
     per_token_lp = response_lp.gather(2, response_tokens.unsqueeze(-1)).squeeze(-1)
 
     return per_token_lp  # (BG, gen_len)
@@ -374,11 +402,11 @@ def grpo_advantages(
 
 
 def grpo_loss(
-    new_log_probs: torch.Tensor,      # (BG, T) per-token log probs from policy
-    old_log_probs: torch.Tensor,      # (BG, T) per-token log probs from old policy
-    ref_log_probs: torch.Tensor,      # (BG, T) per-token log probs from reference
-    advantages: torch.Tensor,          # (BG,) per-sequence advantages
-    response_mask: torch.Tensor,       # (BG, T) mask for response tokens
+    new_log_probs: torch.Tensor,  # (BG, T) per-token log probs from policy
+    old_log_probs: torch.Tensor,  # (BG, T) per-token log probs from old policy
+    ref_log_probs: torch.Tensor,  # (BG, T) per-token log probs from reference
+    advantages: torch.Tensor,  # (BG,) per-sequence advantages
+    response_mask: torch.Tensor,  # (BG, T) mask for response tokens
     clip_eps: float = 0.2,
     kl_coef: float = 0.04,
     kl_type: str = "kl",
@@ -455,7 +483,9 @@ def grpo_loss(
 class GRPOPromptDataset(Dataset):
     """Dataset of prompts with optional reference answers."""
 
-    def __init__(self, data_path: str, tokenizer: ChatTokenizer, max_prompt_len: int = 512):
+    def __init__(
+        self, data_path: str, tokenizer: ChatTokenizer, max_prompt_len: int = 512
+    ):
         self.tokenizer = tokenizer
         self.max_prompt_len = max_prompt_len
         self.items = []
@@ -471,17 +501,25 @@ class GRPOPromptDataset(Dataset):
                 prompt = data.get("prompt", data.get("question", data.get("input", "")))
                 if isinstance(prompt, str):
                     prompt = [{"role": "user", "content": prompt}]
-                elif isinstance(prompt, list) and len(prompt) > 0 and isinstance(prompt[0], str):
+                elif (
+                    isinstance(prompt, list)
+                    and len(prompt) > 0
+                    and isinstance(prompt[0], str)
+                ):
                     prompt = [{"role": "user", "content": prompt[0]}]
 
-                answer = data.get("answer", data.get("reference", data.get("target", None)))
+                answer = data.get(
+                    "answer", data.get("reference", data.get("target", None))
+                )
                 prompt_text = prompt[-1]["content"] if prompt else ""
 
-                self.items.append({
-                    "messages": prompt,
-                    "answer": str(answer) if answer is not None else None,
-                    "prompt_text": prompt_text,
-                })
+                self.items.append(
+                    {
+                        "messages": prompt,
+                        "answer": str(answer) if answer is not None else None,
+                        "prompt_text": prompt_text,
+                    }
+                )
 
         print(f"Loaded {len(self.items)} GRPO prompts from {data_path}")
 
@@ -491,7 +529,7 @@ class GRPOPromptDataset(Dataset):
     def __getitem__(self, idx):
         item = self.items[idx]
         encoded = self.tokenizer.encode_chat(item["messages"])
-        ids = encoded["input_ids"][:self.max_prompt_len]
+        ids = encoded["input_ids"][: self.max_prompt_len]
         return {
             "input_ids": torch.tensor(ids, dtype=torch.long),
             "answer": item["answer"],
@@ -505,10 +543,12 @@ class GRPOCollator:
         self.max_len = max_len
 
     def __call__(self, batch):
-        ids_list = [b["input_ids"][:self.max_len] for b in batch]
+        ids_list = [b["input_ids"][: self.max_len] for b in batch]
         max_len = max(len(ids) for ids in ids_list)
 
-        padded = [F.pad(ids, (0, max_len - len(ids)), value=self.pad_id) for ids in ids_list]
+        padded = [
+            F.pad(ids, (0, max_len - len(ids)), value=self.pad_id) for ids in ids_list
+        ]
         answers = [b["answer"] for b in batch]
         prompt_texts = [b["prompt_text"] for b in batch]
 
@@ -594,17 +634,19 @@ class GRPOTrainer:
         advantages = grpo_advantages(rewards, G)
 
         # 5. Reference model log probs
-        ref_log_probs = compute_ref_log_probs(self.ref_model, full_ids, prompt_len, gen_len)
+        ref_log_probs = compute_ref_log_probs(
+            self.ref_model, full_ids, prompt_len, gen_len
+        )
 
         # 6. Response mask (1 for actual tokens, 0 for padding/post-EOS)
         response_mask = (response_ids != self.tokenizer.pad_id).float()
 
         return {
-            "full_ids": full_ids,           # (BG, prompt_len + gen_len)
+            "full_ids": full_ids,  # (BG, prompt_len + gen_len)
             "old_log_probs": old_log_probs[:, :gen_len],  # (BG, gen_len)
             "ref_log_probs": ref_log_probs,  # (BG, gen_len)
-            "rewards": rewards,              # (BG,)
-            "advantages": advantages,        # (BG,)
+            "rewards": rewards,  # (BG,)
+            "advantages": advantages,  # (BG,)
             "response_mask": response_mask,  # (BG, gen_len)
             "prompt_len": prompt_len,
             "gen_len": gen_len,
@@ -646,10 +688,14 @@ class GRPOTrainer:
                     logits, _ = self.policy_engine(mb_ids)
 
                     # Extract response log probs
-                    resp_logits = logits[:, prompt_len - 1:prompt_len - 1 + gen_len, :]
-                    resp_tokens = mb_ids[:, prompt_len:prompt_len + gen_len]
+                    resp_logits = logits[
+                        :, prompt_len - 1 : prompt_len - 1 + gen_len, :
+                    ]
+                    resp_tokens = mb_ids[:, prompt_len : prompt_len + gen_len]
                     new_log_probs = F.log_softmax(resp_logits, dim=-1)
-                    new_lp = new_log_probs.gather(2, resp_tokens.unsqueeze(-1)).squeeze(-1)
+                    new_lp = new_log_probs.gather(2, resp_tokens.unsqueeze(-1)).squeeze(
+                        -1
+                    )
 
                     # GRPO loss
                     loss, metrics = grpo_loss(
@@ -662,7 +708,9 @@ class GRPOTrainer:
                         kl_coef=self.kl_coef,
                         kl_type=self.config.kl_type,
                         entropy_coef=self.config.entropy_coef,
-                        new_logits=resp_logits if self.config.entropy_coef > 0 else None,
+                        new_logits=(
+                            resp_logits if self.config.entropy_coef > 0 else None
+                        ),
                     )
 
                 self.policy_engine.backward(loss)
@@ -691,10 +739,12 @@ class GRPOTrainer:
 # Main Training
 # =============================================================================
 def train_grpo(args):
+    if deepspeed is None:
+        raise ImportError("DeepSpeed is required for GRPO training.")
+
     deepspeed.init_distributed()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     global_rank = int(os.environ.get("RANK", 0))
-    world_size = int(os.environ.get("WORLD_SIZE", 1))
     torch.cuda.set_device(local_rank)
 
     grpo_config = GRPOConfig(
@@ -719,7 +769,7 @@ def train_grpo(args):
         "1.3b": dict(n_layers=24, n_heads=32, d_model=2048),
         "2.7b": dict(n_layers=32, n_heads=32, d_model=2560),
         "6.7b": dict(n_layers=32, n_heads=32, d_model=4096),
-        "13b":  dict(n_layers=40, n_heads=40, d_model=5120),
+        "13b": dict(n_layers=40, n_heads=40, d_model=5120),
     }
 
     model_kwargs = MODEL_CONFIGS.get(args.model_size, MODEL_CONFIGS["350m"])
@@ -767,6 +817,7 @@ def train_grpo(args):
             print("Using rule-based (outcome) reward")
     elif grpo_config.reward_type == "model":
         from reward_model import RewardModel
+
         rm_backbone = GPTModel(config)
         rm = RewardModel(rm_backbone)
         load_weights(rm, args.reward_model_path, "reward model")
@@ -775,7 +826,9 @@ def train_grpo(args):
         for p in rm.parameters():
             p.requires_grad = False
         tokenizer_for_rm = ChatTokenizer(encoding_name="gpt2")
-        reward_fn = RewardModelWrapper(rm, tokenizer_for_rm, device=f"cuda:{local_rank}")
+        reward_fn = RewardModelWrapper(
+            rm, tokenizer_for_rm, device=f"cuda:{local_rank}"
+        )
         if global_rank == 0:
             print("Using trained reward model")
     else:
@@ -785,7 +838,9 @@ def train_grpo(args):
     # Dataset
     # -------------------------------------------------------------------------
     tokenizer = ChatTokenizer(encoding_name="gpt2")
-    dataset = GRPOPromptDataset(args.data_path, tokenizer, max_prompt_len=args.max_prompt_len)
+    dataset = GRPOPromptDataset(
+        args.data_path, tokenizer, max_prompt_len=args.max_prompt_len
+    )
     collator = GRPOCollator(pad_id=tokenizer.pad_id, max_len=args.max_prompt_len)
 
     # FP8
@@ -861,7 +916,9 @@ def train_grpo(args):
 
         if step % args.log_interval == 0 and global_rank == 0:
             elapsed = time.time() - t_start
-            recent_reward = sum(reward_history[-args.log_interval:]) / min(len(reward_history), args.log_interval)
+            recent_reward = sum(reward_history[-args.log_interval :]) / min(
+                len(reward_history), args.log_interval
+            )
 
             # Show a sample completion
             sample_idx = 0
@@ -881,23 +938,28 @@ def train_grpo(args):
 
             try:
                 import wandb
+
                 if wandb.run:
-                    wandb.log({
-                        "grpo/reward": recent_reward,
-                        "grpo/kl": metrics.get("kl", 0),
-                        "grpo/kl_coef": trainer.kl_coef,
-                        "grpo/pg_loss": metrics.get("pg_loss", 0),
-                        "grpo/kl_loss": metrics.get("kl_loss", 0),
-                        "grpo/clip_frac": metrics.get("clip_frac", 0),
-                        "grpo/entropy": metrics.get("entropy", 0),
-                        "grpo/loss": metrics.get("loss", 0),
-                        "grpo/step": step,
-                    })
+                    wandb.log(
+                        {
+                            "grpo/reward": recent_reward,
+                            "grpo/kl": metrics.get("kl", 0),
+                            "grpo/kl_coef": trainer.kl_coef,
+                            "grpo/pg_loss": metrics.get("pg_loss", 0),
+                            "grpo/kl_loss": metrics.get("kl_loss", 0),
+                            "grpo/clip_frac": metrics.get("clip_frac", 0),
+                            "grpo/entropy": metrics.get("entropy", 0),
+                            "grpo/loss": metrics.get("loss", 0),
+                            "grpo/step": step,
+                        }
+                    )
             except ImportError:
                 pass
 
         if args.save_interval > 0 and step % args.save_interval == 0:
-            model_engine.save_checkpoint(os.path.join(args.save_dir, f"grpo_step_{step}"))
+            model_engine.save_checkpoint(
+                os.path.join(args.save_dir, f"grpo_step_{step}")
+            )
 
     # Save final
     if args.save_dir:
@@ -906,7 +968,9 @@ def train_grpo(args):
     if global_rank == 0:
         total_time = time.time() - t_start
         print(f"\nGRPO training complete in {total_time:.1f}s")
-        print(f"Final avg reward: {sum(reward_history[-50:]) / min(len(reward_history), 50):.3f}")
+        print(
+            f"Final avg reward: {sum(reward_history[-50:]) / min(len(reward_history), 50):.3f}"
+        )
 
 
 # =============================================================================
@@ -917,7 +981,9 @@ def parse_args():
 
     # Model
     parser.add_argument("--model_size", type=str, default="350m")
-    parser.add_argument("--policy_model", type=str, default=None, help="Path to SFT checkpoint")
+    parser.add_argument(
+        "--policy_model", type=str, default=None, help="Path to SFT checkpoint"
+    )
     parser.add_argument("--seq_len", type=int, default=2048)
     parser.add_argument("--max_prompt_len", type=int, default=512)
     parser.add_argument("--max_new_tokens", type=int, default=512)
@@ -927,22 +993,34 @@ def parse_args():
     parser.add_argument("--no_flash_attn", action="store_false", dest="use_flash_attn")
     parser.add_argument("--use_te", action="store_true", default=True)
     parser.add_argument("--no_te", action="store_false", dest="use_te")
-    parser.add_argument("--use_flash_attn_3", action="store_true", default=False,
-                        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)")
+    parser.add_argument(
+        "--use_flash_attn_3",
+        action="store_true",
+        default=False,
+        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)",
+    )
     parser.add_argument("--fp8", action="store_true", default=False)
 
     # GRPO
-    parser.add_argument("--group_size", type=int, default=8, help="G: completions per prompt")
-    parser.add_argument("--grpo_epochs", type=int, default=1, help="μ: optimization epochs per batch")
+    parser.add_argument(
+        "--group_size", type=int, default=8, help="G: completions per prompt"
+    )
+    parser.add_argument(
+        "--grpo_epochs", type=int, default=1, help="μ: optimization epochs per batch"
+    )
     parser.add_argument("--mini_batch_size", type=int, default=4)
     parser.add_argument("--clip_eps", type=float, default=0.2)
     parser.add_argument("--kl_coef", type=float, default=0.04)
     parser.add_argument("--kl_type", type=str, default="kl", choices=["kl", "abs"])
-    parser.add_argument("--kl_target", type=float, default=None, help="Adaptive KL target")
+    parser.add_argument(
+        "--kl_target", type=float, default=None, help="Adaptive KL target"
+    )
     parser.add_argument("--entropy_coef", type=float, default=0.0)
 
     # Reward
-    parser.add_argument("--reward_type", type=str, default="rule", choices=["rule", "model"])
+    parser.add_argument(
+        "--reward_type", type=str, default="rule", choices=["rule", "model"]
+    )
     parser.add_argument("--reward_model_path", type=str, default=None)
     parser.add_argument("--length_penalty", type=float, default=0.0)
 

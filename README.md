@@ -18,6 +18,48 @@ Pre-training ──→ SFT ──┬─┤
                              multimodal_train.py
 ```
 
+## Status
+
+This repository is an independent implementation and review artifact for LLM training systems. The code is designed to make the major training stages readable and inspectable, with lightweight CPU checks for core model/data/loss paths and GPU-oriented scripts for real distributed training.
+
+### What Works
+
+- GPT-style decoder model with RoPE, RMSNorm, SwiGLU, GQA, optional Flash Attention, and optional Transformer Engine layers
+- Synthetic data generation for SFT, preference/RLHF, prompt-only PPO, and GRPO reasoning tasks
+- Dataset and collator paths for pre-training, SFT, DPO, reward modeling, PPO, GRPO, and multimodal training
+- Loss/reward implementations for SFT masking, DPO/IPO/SimPO, Bradley-Terry reward modeling, PPO utilities, and GRPO rule-based rewards
+- CPU unit tests for model shape, JSONL data formats, and reward/loss behavior
+- GitHub Actions workflow for Black, Ruff, syntax checks, and unit tests
+
+### Smoke Tests
+
+The `examples/` scripts run small CPU checks for each stage without requiring GPUs or DeepSpeed:
+
+```bash
+bash examples/pretrain_smoke.sh
+bash examples/sft_smoke.sh
+bash examples/dpo_smoke.sh
+bash examples/reward_model_smoke.sh
+bash examples/ppo_smoke.sh
+bash examples/grpo_smoke.sh
+```
+
+For the full local quality gate:
+
+```bash
+black --check .
+ruff check .
+pytest -q
+python -m py_compile train.py sft.py dpo.py reward_model.py ppo.py grpo.py multimodal_train.py
+```
+
+### Limitations
+
+- Full training paths are intended for CUDA environments with DeepSpeed; the CPU smoke tests validate code paths but do not benchmark large-scale training.
+- Flash Attention 3 and Transformer Engine are optional GPU dependencies and are only used when installed.
+- Multimodal training includes dataset/model/training structure, but meaningful results require real image/video datasets and GPU training.
+- The sample datasets are synthetic and should be treated as format checks, not as training-quality corpora.
+
 ## Features
 
 - **Flash Attention 2/3** — fast and memory-efficient attention (FA3 via `kernels` library for Hopper GPUs)
@@ -72,6 +114,15 @@ pip install kernels
 ### Quick Test with Synthetic Data
 
 ```bash
+# CPU smoke tests (no DeepSpeed/GPU required)
+pytest -q
+bash examples/pretrain_smoke.sh
+bash examples/sft_smoke.sh
+bash examples/dpo_smoke.sh
+bash examples/reward_model_smoke.sh
+bash examples/ppo_smoke.sh
+bash examples/grpo_smoke.sh
+
 # Generate sample data for all stages
 python generate_sample_data.py --output_dir data/
 
@@ -378,6 +429,9 @@ deepspeed --num_gpus=8 multimodal_train.py --stage 1 \
 ├── multimodal_data.py       # Multimodal datasets + synthetic data generator
 ├── generate_sample_data.py  # Synthetic SFT/DPO/PPO test data
 ├── generate_grpo_data.py    # Math/reasoning GRPO data generator
+├── examples/                # CPU smoke checks for each stage
+├── tests/                   # Pytest coverage for model/data/reward paths
+├── .github/workflows/       # CI quality gate
 ├── ds_config.json           # DeepSpeed ZeRO-2 config (pre-training)
 ├── ds_config_zero3.json     # DeepSpeed ZeRO-3 config (large models)
 ├── ds_config_sft.json       # DeepSpeed config (post-training)

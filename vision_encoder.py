@@ -11,8 +11,8 @@ Architecture: Image → ViT Encoder → Pixel Shuffle → MLP Projector → Visu
 """
 
 import math
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -25,32 +25,32 @@ import torch.nn.functional as F
 @dataclass
 class VisionConfig:
     # Encoder
-    image_size: int = 448           # Input resolution per tile
-    patch_size: int = 14            # ViT patch size
+    image_size: int = 448  # Input resolution per tile
+    patch_size: int = 14  # ViT patch size
     in_channels: int = 3
-    hidden_size: int = 1152         # ViT hidden dim (SigLIP-400M ~ 1152)
-    num_layers: int = 27            # ViT depth
+    hidden_size: int = 1152  # ViT hidden dim (SigLIP-400M ~ 1152)
+    num_layers: int = 27  # ViT depth
     num_heads: int = 16
     mlp_ratio: float = 4.0
     dropout: float = 0.0
 
     # Projector
-    projector_type: str = "mlp"     # "mlp" or "cross_attn"
-    projector_depth: int = 2        # Number of MLP layers
-    llm_hidden_size: int = 1024     # Must match LLM d_model
+    projector_type: str = "mlp"  # "mlp" or "cross_attn"
+    projector_depth: int = 2  # Number of MLP layers
+    llm_hidden_size: int = 1024  # Must match LLM d_model
 
     # Token compression
-    pixel_shuffle_ratio: int = 2    # 2 = 4x reduction, 3 = 9x reduction
+    pixel_shuffle_ratio: int = 2  # 2 = 4x reduction, 3 = 9x reduction
     use_pixel_shuffle: bool = True
 
     # Dynamic resolution
     min_tiles: int = 1
-    max_tiles: int = 12             # Max number of tiles per image
+    max_tiles: int = 12  # Max number of tiles per image
     tile_size: int = 448
 
     # Video
-    max_frames: int = 64            # Max frames for video
-    fps_sample: float = 1.0         # Frames per second to sample
+    max_frames: int = 64  # Max frames for video
+    fps_sample: float = 1.0  # Frames per second to sample
 
     @property
     def num_patches(self):
@@ -61,7 +61,7 @@ class VisionConfig:
         """Tokens per tile after pixel shuffle."""
         n = self.num_patches
         if self.use_pixel_shuffle:
-            n = n // (self.pixel_shuffle_ratio ** 2)
+            n = n // (self.pixel_shuffle_ratio**2)
         return n
 
 
@@ -72,8 +72,10 @@ class VisionPatchEmbedding(nn.Module):
     def __init__(self, config: VisionConfig):
         super().__init__()
         self.proj = nn.Conv2d(
-            config.in_channels, config.hidden_size,
-            kernel_size=config.patch_size, stride=config.patch_size,
+            config.in_channels,
+            config.hidden_size,
+            kernel_size=config.patch_size,
+            stride=config.patch_size,
         )
         num_patches = config.num_patches
         self.position_embedding = nn.Parameter(
@@ -82,18 +84,23 @@ class VisionPatchEmbedding(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """x: (B, C, H, W) -> (B, N, D)"""
-        x = self.proj(x)                    # (B, D, H', W')
-        x = x.flatten(2).transpose(1, 2)    # (B, N, D)
-        x = x + self.position_embedding[:, :x.shape[1]]
+        x = self.proj(x)  # (B, D, H', W')
+        x = x.flatten(2).transpose(1, 2)  # (B, N, D)
+        x = x + self.position_embedding[:, : x.shape[1]]
         return x
 
 
 class VisionTransformerBlock(nn.Module):
-    def __init__(self, hidden_size: int, num_heads: int, mlp_ratio: float, dropout: float = 0.0):
+    def __init__(
+        self, hidden_size: int, num_heads: int, mlp_ratio: float, dropout: float = 0.0
+    ):
         super().__init__()
         self.norm1 = nn.LayerNorm(hidden_size)
         self.attn = nn.MultiheadAttention(
-            hidden_size, num_heads, dropout=dropout, batch_first=True,
+            hidden_size,
+            num_heads,
+            dropout=dropout,
+            batch_first=True,
         )
         self.norm2 = nn.LayerNorm(hidden_size)
         mlp_hidden = int(hidden_size * mlp_ratio)
@@ -119,13 +126,17 @@ class VisionTransformer(nn.Module):
         super().__init__()
         self.config = config
         self.patch_embed = VisionPatchEmbedding(config)
-        self.blocks = nn.ModuleList([
-            VisionTransformerBlock(
-                config.hidden_size, config.num_heads,
-                config.mlp_ratio, config.dropout,
-            )
-            for _ in range(config.num_layers)
-        ])
+        self.blocks = nn.ModuleList(
+            [
+                VisionTransformerBlock(
+                    config.hidden_size,
+                    config.num_heads,
+                    config.mlp_ratio,
+                    config.dropout,
+                )
+                for _ in range(config.num_layers)
+            ]
+        )
         self.norm = nn.LayerNorm(config.hidden_size)
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
@@ -148,21 +159,26 @@ class VisionTransformer(nn.Module):
 class PretrainedVisionEncoder(nn.Module):
     """Load pretrained vision encoders from timm or HuggingFace."""
 
-    def __init__(self, model_name: str = "vit_so400m_patch14_siglip_384",
-                 hidden_size: int = 1152, freeze: bool = True):
+    def __init__(
+        self,
+        model_name: str = "vit_so400m_patch14_siglip_384",
+        hidden_size: int = 1152,
+        freeze: bool = True,
+    ):
         super().__init__()
         self.hidden_size = hidden_size
         self.freeze = freeze
 
         try:
             import timm
+
             self.model = timm.create_model(
                 model_name,
                 pretrained=True,
                 num_classes=0,  # Remove classification head
             )
             # Get feature dim
-            if hasattr(self.model, 'embed_dim'):
+            if hasattr(self.model, "embed_dim"):
                 self.actual_hidden_size = self.model.embed_dim
             else:
                 self.actual_hidden_size = hidden_size
@@ -172,8 +188,10 @@ class PretrainedVisionEncoder(nn.Module):
                     p.requires_grad = False
                 self.model.eval()
 
-            print(f"Loaded pretrained vision encoder: {model_name} "
-                  f"(hidden={self.actual_hidden_size}, frozen={freeze})")
+            print(
+                f"Loaded pretrained vision encoder: {model_name} "
+                f"(hidden={self.actual_hidden_size}, frozen={freeze})"
+            )
 
         except (ImportError, Exception) as e:
             print(f"Could not load pretrained encoder ({e}), using random init ViT")
@@ -220,7 +238,7 @@ class PixelShuffle2D(nn.Module):
         new_h = (h // r) * r
         new_w = (w // r) * r
         if new_h * new_w < N:
-            x = x[:, :new_h * new_w]
+            x = x[:, : new_h * new_w]
 
         x = x.view(B, new_h // r, r, new_w // r, r, D)
         x = x.permute(0, 1, 3, 2, 4, 5).contiguous()  # (B, H', W', r, r, D)
@@ -254,25 +272,38 @@ class MLPProjector(nn.Module):
 class CrossAttentionProjector(nn.Module):
     """Cross-attention based projector with learnable queries."""
 
-    def __init__(self, vision_hidden: int, llm_hidden: int,
-                 num_queries: int = 64, num_heads: int = 8, depth: int = 2):
+    def __init__(
+        self,
+        vision_hidden: int,
+        llm_hidden: int,
+        num_queries: int = 64,
+        num_heads: int = 8,
+        depth: int = 2,
+    ):
         super().__init__()
         self.queries = nn.Parameter(torch.randn(1, num_queries, llm_hidden) * 0.02)
         self.layers = nn.ModuleList()
         for _ in range(depth):
-            self.layers.append(nn.ModuleDict({
-                "cross_attn": nn.MultiheadAttention(
-                    llm_hidden, num_heads, kdim=vision_hidden, vdim=vision_hidden,
-                    batch_first=True,
-                ),
-                "norm1": nn.LayerNorm(llm_hidden),
-                "ffn": nn.Sequential(
-                    nn.Linear(llm_hidden, llm_hidden * 4),
-                    nn.GELU(),
-                    nn.Linear(llm_hidden * 4, llm_hidden),
-                ),
-                "norm2": nn.LayerNorm(llm_hidden),
-            }))
+            self.layers.append(
+                nn.ModuleDict(
+                    {
+                        "cross_attn": nn.MultiheadAttention(
+                            llm_hidden,
+                            num_heads,
+                            kdim=vision_hidden,
+                            vdim=vision_hidden,
+                            batch_first=True,
+                        ),
+                        "norm1": nn.LayerNorm(llm_hidden),
+                        "ffn": nn.Sequential(
+                            nn.Linear(llm_hidden, llm_hidden * 4),
+                            nn.GELU(),
+                            nn.Linear(llm_hidden * 4, llm_hidden),
+                        ),
+                        "norm2": nn.LayerNorm(llm_hidden),
+                    }
+                )
+            )
 
     def forward(self, vision_features: torch.Tensor) -> torch.Tensor:
         B = vision_features.shape[0]
@@ -330,8 +361,10 @@ class DynamicTiler:
         target_h = rows * self.tile_size
         target_w = cols * self.tile_size
         image = F.interpolate(
-            image.unsqueeze(0), size=(target_h, target_w),
-            mode="bicubic", align_corners=False,
+            image.unsqueeze(0),
+            size=(target_h, target_w),
+            mode="bicubic",
+            align_corners=False,
         ).squeeze(0)
 
         # Split into tiles
@@ -340,13 +373,15 @@ class DynamicTiler:
             for c in range(cols):
                 y0 = r * self.tile_size
                 x0 = c * self.tile_size
-                tile = image[:, y0:y0 + self.tile_size, x0:x0 + self.tile_size]
+                tile = image[:, y0 : y0 + self.tile_size, x0 : x0 + self.tile_size]
                 tiles.append(tile)
 
         # Add a thumbnail (global view)
         thumbnail = F.interpolate(
-            image.unsqueeze(0), size=(self.tile_size, self.tile_size),
-            mode="bicubic", align_corners=False,
+            image.unsqueeze(0),
+            size=(self.tile_size, self.tile_size),
+            mode="bicubic",
+            align_corners=False,
         ).squeeze(0)
         tiles.append(thumbnail)
 
@@ -359,8 +394,9 @@ class DynamicTiler:
 class VideoProcessor:
     """Extract and process frames from video tensors."""
 
-    def __init__(self, max_frames: int = 64, fps_sample: float = 1.0,
-                 image_size: int = 448):
+    def __init__(
+        self, max_frames: int = 64, fps_sample: float = 1.0, image_size: int = 448
+    ):
         self.max_frames = max_frames
         self.fps_sample = fps_sample
         self.image_size = image_size
@@ -386,8 +422,10 @@ class VideoProcessor:
         # Resize
         if frames.shape[-2] != self.image_size or frames.shape[-1] != self.image_size:
             frames = F.interpolate(
-                frames, size=(self.image_size, self.image_size),
-                mode="bicubic", align_corners=False,
+                frames,
+                size=(self.image_size, self.image_size),
+                mode="bicubic",
+                align_corners=False,
             )
 
         return frames
@@ -397,6 +435,7 @@ class VideoProcessor:
         try:
             import decord
             from decord import VideoReader, cpu
+
             decord.bridge.set_bridge("torch")
 
             vr = VideoReader(video_path, ctx=cpu(0))
@@ -409,10 +448,15 @@ class VideoProcessor:
             frames = vr.get_batch(indices)  # (T, H, W, C)
             frames = frames.permute(0, 3, 1, 2).float() / 255.0  # (T, C, H, W)
 
-            if frames.shape[-2] != self.image_size or frames.shape[-1] != self.image_size:
+            if (
+                frames.shape[-2] != self.image_size
+                or frames.shape[-1] != self.image_size
+            ):
                 frames = F.interpolate(
-                    frames, size=(self.image_size, self.image_size),
-                    mode="bicubic", align_corners=False,
+                    frames,
+                    size=(self.image_size, self.image_size),
+                    mode="bicubic",
+                    align_corners=False,
                 )
             return frames
 
@@ -438,7 +482,9 @@ class VisionModule(nn.Module):
         # Vision encoder
         if pretrained_encoder:
             self.encoder = PretrainedVisionEncoder(
-                pretrained_encoder, config.hidden_size, freeze=True,
+                pretrained_encoder,
+                config.hidden_size,
+                freeze=True,
             )
             encoder_hidden = self.encoder.actual_hidden_size
         else:
@@ -448,17 +494,22 @@ class VisionModule(nn.Module):
         # Pixel shuffle compression
         self.pixel_shuffle = None
         if config.use_pixel_shuffle:
-            self.pixel_shuffle = PixelShuffle2D(encoder_hidden, config.pixel_shuffle_ratio)
+            self.pixel_shuffle = PixelShuffle2D(
+                encoder_hidden, config.pixel_shuffle_ratio
+            )
 
         # Projector
         proj_input_dim = encoder_hidden
         if config.projector_type == "mlp":
             self.projector = MLPProjector(
-                proj_input_dim, config.llm_hidden_size, config.projector_depth,
+                proj_input_dim,
+                config.llm_hidden_size,
+                config.projector_depth,
             )
         elif config.projector_type == "cross_attn":
             self.projector = CrossAttentionProjector(
-                proj_input_dim, config.llm_hidden_size,
+                proj_input_dim,
+                config.llm_hidden_size,
             )
         else:
             raise ValueError(f"Unknown projector type: {config.projector_type}")
@@ -468,13 +519,21 @@ class VisionModule(nn.Module):
 
         # Video processor
         self.video_processor = VideoProcessor(
-            config.max_frames, config.fps_sample, config.image_size,
+            config.max_frames,
+            config.fps_sample,
+            config.image_size,
         )
 
         # Special tokens (learnable)
-        self.image_start_token = nn.Parameter(torch.randn(1, 1, config.llm_hidden_size) * 0.02)
-        self.image_end_token = nn.Parameter(torch.randn(1, 1, config.llm_hidden_size) * 0.02)
-        self.frame_separator = nn.Parameter(torch.randn(1, 1, config.llm_hidden_size) * 0.02)
+        self.image_start_token = nn.Parameter(
+            torch.randn(1, 1, config.llm_hidden_size) * 0.02
+        )
+        self.image_end_token = nn.Parameter(
+            torch.randn(1, 1, config.llm_hidden_size) * 0.02
+        )
+        self.frame_separator = nn.Parameter(
+            torch.randn(1, 1, config.llm_hidden_size) * 0.02
+        )
 
     def encode_image(self, pixel_values: torch.Tensor) -> torch.Tensor:
         """
@@ -529,7 +588,7 @@ class VisionModule(nn.Module):
         # Interleave frame features with separator tokens
         tokens_list = [self.image_start_token.expand(1, -1, -1)]
         for i in range(T):
-            tokens_list.append(frame_features[i:i + 1])  # (1, N, D)
+            tokens_list.append(frame_features[i : i + 1])  # (1, N, D)
             if i < T - 1:
                 tokens_list.append(self.frame_separator.expand(1, -1, -1))
         tokens_list.append(self.image_end_token.expand(1, -1, -1))
@@ -570,8 +629,11 @@ class VisionModule(nn.Module):
             for t in all_tokens:
                 if t.shape[1] < max_len:
                     pad = torch.zeros(
-                        1, max_len - t.shape[1], t.shape[2],
-                        device=t.device, dtype=t.dtype,
+                        1,
+                        max_len - t.shape[1],
+                        t.shape[2],
+                        device=t.device,
+                        dtype=t.dtype,
                     )
                     t = torch.cat([t, pad], dim=1)
                 padded.append(t)

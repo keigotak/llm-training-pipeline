@@ -11,7 +11,6 @@ Supports:
 import json
 import os
 import random
-from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -23,8 +22,9 @@ from sft import ChatTokenizer
 # =============================================================================
 # Image transforms (minimal, no torchvision dependency)
 # =============================================================================
-def normalize_image(image: torch.Tensor, mean=(0.485, 0.456, 0.406),
-                    std=(0.229, 0.224, 0.225)) -> torch.Tensor:
+def normalize_image(
+    image: torch.Tensor, mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
+) -> torch.Tensor:
     """Normalize image tensor. image: (C, H, W) in [0, 1]."""
     mean = torch.tensor(mean, device=image.device).view(3, 1, 1)
     std = torch.tensor(std, device=image.device).view(3, 1, 1)
@@ -36,6 +36,7 @@ def load_image(path: str, image_size: int = 448) -> torch.Tensor:
     try:
         from PIL import Image
         import torchvision.transforms.functional as TF
+
         img = Image.open(path).convert("RGB")
         img = TF.resize(img, (image_size, image_size))
         img = TF.to_tensor(img)
@@ -50,12 +51,15 @@ def load_video(path: str, max_frames: int = 32, image_size: int = 448) -> torch.
     try:
         import decord
         from decord import VideoReader, cpu
+
         decord.bridge.set_bridge("torch")
         vr = VideoReader(path, ctx=cpu(0))
         total = len(vr)
         indices = torch.linspace(0, total - 1, min(max_frames, total)).long().tolist()
         frames = vr.get_batch(indices).permute(0, 3, 1, 2).float() / 255.0
-        frames = F.interpolate(frames, size=(image_size, image_size), mode="bicubic", align_corners=False)
+        frames = F.interpolate(
+            frames, size=(image_size, image_size), mode="bicubic", align_corners=False
+        )
         for i in range(frames.shape[0]):
             frames[i] = normalize_image(frames[i])
         return frames
@@ -76,8 +80,14 @@ class AlignmentDataset(Dataset):
 
     IMAGE_TOKEN = "<image>"
 
-    def __init__(self, data_path: str, image_dir: str, tokenizer: ChatTokenizer,
-                 image_size: int = 448, max_seq_len: int = 512):
+    def __init__(
+        self,
+        data_path: str,
+        image_dir: str,
+        tokenizer: ChatTokenizer,
+        image_size: int = 448,
+        max_seq_len: int = 512,
+    ):
         self.tokenizer = tokenizer
         self.image_size = image_size
         self.max_seq_len = max_seq_len
@@ -103,7 +113,9 @@ class AlignmentDataset(Dataset):
         image_path = example.get("image", example.get("image_path", ""))
 
         # Load image
-        full_path = os.path.join(self.image_dir, image_path) if self.image_dir else image_path
+        full_path = (
+            os.path.join(self.image_dir, image_path) if self.image_dir else image_path
+        )
         if os.path.exists(full_path):
             pixel_values = load_image(full_path, self.image_size)
         else:
@@ -111,14 +123,14 @@ class AlignmentDataset(Dataset):
 
         # Tokenize: "<image> caption"
         prompt = f"{self.IMAGE_TOKEN} {caption}"
-        tokens = self.tokenizer.encode(prompt)[:self.max_seq_len]
+        tokens = self.tokenizer.encode(prompt)[: self.max_seq_len]
         input_ids = torch.tensor([self.tokenizer.bos_id] + tokens, dtype=torch.long)
 
         # Labels: train on caption tokens, mask image placeholder
         image_token_pos = 1  # After BOS
         labels = input_ids.clone()
         # Mask everything up to and including the image placeholder region
-        labels[:image_token_pos + 1] = -100
+        labels[: image_token_pos + 1] = -100
 
         return {
             "input_ids": input_ids,
@@ -152,8 +164,15 @@ class MultimodalSFTDataset(Dataset):
         ]}
     """
 
-    def __init__(self, data_path: str, media_dir: str, tokenizer: ChatTokenizer,
-                 image_size: int = 448, max_seq_len: int = 2048, max_frames: int = 32):
+    def __init__(
+        self,
+        data_path: str,
+        media_dir: str,
+        tokenizer: ChatTokenizer,
+        image_size: int = 448,
+        max_seq_len: int = 2048,
+        max_frames: int = 32,
+    ):
         self.tokenizer = tokenizer
         self.image_size = image_size
         self.max_seq_len = max_seq_len
@@ -180,9 +199,15 @@ class MultimodalSFTDataset(Dataset):
         media_type = "none"
 
         if "image" in example:
-            path = os.path.join(self.media_dir, example["image"]) if self.media_dir else example["image"]
+            path = (
+                os.path.join(self.media_dir, example["image"])
+                if self.media_dir
+                else example["image"]
+            )
             if os.path.exists(path):
-                pixel_values = load_image(path, self.image_size).unsqueeze(0)  # (1, C, H, W)
+                pixel_values = load_image(path, self.image_size).unsqueeze(
+                    0
+                )  # (1, C, H, W)
             else:
                 pixel_values = torch.randn(1, 3, self.image_size, self.image_size)
             media_type = "image"
@@ -190,7 +215,11 @@ class MultimodalSFTDataset(Dataset):
         elif "images" in example:
             imgs = []
             for img_path in example["images"]:
-                path = os.path.join(self.media_dir, img_path) if self.media_dir else img_path
+                path = (
+                    os.path.join(self.media_dir, img_path)
+                    if self.media_dir
+                    else img_path
+                )
                 if os.path.exists(path):
                     imgs.append(load_image(path, self.image_size))
                 else:
@@ -199,7 +228,11 @@ class MultimodalSFTDataset(Dataset):
             media_type = "multi_image"
 
         elif "video" in example:
-            path = os.path.join(self.media_dir, example["video"]) if self.media_dir else example["video"]
+            path = (
+                os.path.join(self.media_dir, example["video"])
+                if self.media_dir
+                else example["video"]
+            )
             if os.path.exists(path):
                 video_frames = load_video(path, self.max_frames, self.image_size)
             else:
@@ -217,13 +250,16 @@ class MultimodalSFTDataset(Dataset):
 
         # Tokenize conversation with loss masking
         encoded = self.tokenizer.encode_chat(messages)
-        input_ids = encoded["input_ids"][:self.max_seq_len]
-        loss_mask = encoded["loss_mask"][:self.max_seq_len]
+        input_ids = encoded["input_ids"][: self.max_seq_len]
+        loss_mask = encoded["loss_mask"][: self.max_seq_len]
 
         # Labels: only train on assistant tokens
         labels = input_ids[1:] + [self.tokenizer.pad_id]
         loss_mask_shifted = loss_mask[1:] + [0]
-        labels = [l if m == 1 else -100 for l, m in zip(labels, loss_mask_shifted)]
+        labels = [
+            label if mask == 1 else -100
+            for label, mask in zip(labels, loss_mask_shifted)
+        ]
 
         result = {
             "input_ids": torch.tensor(input_ids, dtype=torch.long),
@@ -252,8 +288,14 @@ class MultimodalDPODataset(Dataset):
          "rejected": [{"role": "user", "content": "<image>\nDescribe"}, {"role": "assistant", "content": "Bad answer"}]}
     """
 
-    def __init__(self, data_path: str, media_dir: str, tokenizer: ChatTokenizer,
-                 image_size: int = 448, max_seq_len: int = 2048):
+    def __init__(
+        self,
+        data_path: str,
+        media_dir: str,
+        tokenizer: ChatTokenizer,
+        image_size: int = 448,
+        max_seq_len: int = 2048,
+    ):
         self.tokenizer = tokenizer
         self.image_size = image_size
         self.max_seq_len = max_seq_len
@@ -276,13 +318,19 @@ class MultimodalDPODataset(Dataset):
 
     def _encode(self, messages):
         encoded = self.tokenizer.encode_chat(messages)
-        ids = encoded["input_ids"][:self.max_seq_len]
-        mask = encoded["loss_mask"][:self.max_seq_len]
-        return torch.tensor(ids, dtype=torch.long), torch.tensor(mask, dtype=torch.float)
+        ids = encoded["input_ids"][: self.max_seq_len]
+        mask = encoded["loss_mask"][: self.max_seq_len]
+        return torch.tensor(ids, dtype=torch.long), torch.tensor(
+            mask, dtype=torch.float
+        )
 
     def _load_image(self, example):
         if "image" in example:
-            path = os.path.join(self.media_dir, example["image"]) if self.media_dir else example["image"]
+            path = (
+                os.path.join(self.media_dir, example["image"])
+                if self.media_dir
+                else example["image"]
+            )
             if os.path.exists(path):
                 return load_image(path, self.image_size)
         return torch.randn(3, self.image_size, self.image_size)
@@ -315,8 +363,14 @@ class MultimodalGRPODataset(Dataset):
         {"image": "chart.png", "prompt": "What is the highest value?", "answer": "42"}
     """
 
-    def __init__(self, data_path: str, media_dir: str, tokenizer: ChatTokenizer,
-                 image_size: int = 448, max_prompt_len: int = 512):
+    def __init__(
+        self,
+        data_path: str,
+        media_dir: str,
+        tokenizer: ChatTokenizer,
+        image_size: int = 448,
+        max_prompt_len: int = 512,
+    ):
         self.tokenizer = tokenizer
         self.image_size = image_size
         self.max_prompt_len = max_prompt_len
@@ -344,12 +398,16 @@ class MultimodalGRPODataset(Dataset):
             prompt = [{"role": "user", "content": prompt}]
 
         encoded = self.tokenizer.encode_chat(prompt)
-        ids = encoded["input_ids"][:self.max_prompt_len]
+        ids = encoded["input_ids"][: self.max_prompt_len]
 
         # Image
         pixel_values = None
         if "image" in item:
-            path = os.path.join(self.media_dir, item["image"]) if self.media_dir else item["image"]
+            path = (
+                os.path.join(self.media_dir, item["image"])
+                if self.media_dir
+                else item["image"]
+            )
             if os.path.exists(path):
                 pixel_values = load_image(path, self.image_size)
             else:
@@ -432,7 +490,9 @@ class MultimodalSFTCollator:
                 pixel_values_list.append(b["pixel_values"])
                 has_image = True
             else:
-                pixel_values_list.append(torch.zeros(1, 3, self.image_size, self.image_size))
+                pixel_values_list.append(
+                    torch.zeros(1, 3, self.image_size, self.image_size)
+                )
 
             if "video_frames" in b:
                 video_frames_list.append(b["video_frames"])
@@ -460,7 +520,10 @@ class MultimodalSFTCollator:
             for vf in video_frames_list:
                 if vf.shape[0] < max_frames:
                     pad = torch.zeros(
-                        max_frames - vf.shape[0], 3, self.image_size, self.image_size,
+                        max_frames - vf.shape[0],
+                        3,
+                        self.image_size,
+                        self.image_size,
                     )
                     vf = torch.cat([vf, pad], dim=0)
                 padded_videos.append(vf)
@@ -496,10 +559,15 @@ def generate_synthetic_multimodal_data(
     # Alignment data
     with open(os.path.join(output_dir, "mm_alignment.jsonl"), "w") as f:
         for i in range(num_alignment):
-            f.write(json.dumps({
-                "image": f"images/img_{i:06d}.jpg",
-                "caption": random.choice(captions),
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "image": f"images/img_{i:06d}.jpg",
+                        "caption": random.choice(captions),
+                    }
+                )
+                + "\n"
+            )
 
     # SFT data
     questions = [
@@ -513,50 +581,87 @@ def generate_synthetic_multimodal_data(
     with open(os.path.join(output_dir, "mm_sft.jsonl"), "w") as f:
         for i in range(num_sft):
             question = random.choice(questions)
-            answer = random.choice(captions) + " The image conveys a sense of " + \
-                     random.choice(["tranquility", "excitement", "wonder", "joy"]) + "."
-            f.write(json.dumps({
-                "image": f"images/img_{i:06d}.jpg",
-                "messages": [
-                    {"role": "user", "content": f"<image>\n{question}"},
-                    {"role": "assistant", "content": answer},
-                ],
-            }) + "\n")
+            answer = (
+                random.choice(captions)
+                + " The image conveys a sense of "
+                + random.choice(["tranquility", "excitement", "wonder", "joy"])
+                + "."
+            )
+            f.write(
+                json.dumps(
+                    {
+                        "image": f"images/img_{i:06d}.jpg",
+                        "messages": [
+                            {"role": "user", "content": f"<image>\n{question}"},
+                            {"role": "assistant", "content": answer},
+                        ],
+                    }
+                )
+                + "\n"
+            )
 
         # Video examples
         for i in range(num_sft // 10):
-            f.write(json.dumps({
-                "video": f"videos/vid_{i:04d}.mp4",
-                "messages": [
-                    {"role": "user", "content": "<video>\nDescribe what happens in this video."},
-                    {"role": "assistant", "content": "The video shows a sequence of events..."},
-                ],
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "video": f"videos/vid_{i:04d}.mp4",
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": "<video>\nDescribe what happens in this video.",
+                            },
+                            {
+                                "role": "assistant",
+                                "content": "The video shows a sequence of events...",
+                            },
+                        ],
+                    }
+                )
+                + "\n"
+            )
 
     # DPO data
     with open(os.path.join(output_dir, "mm_dpo.jsonl"), "w") as f:
         for i in range(num_dpo):
             question = random.choice(questions)
-            f.write(json.dumps({
-                "image": f"images/img_{i:06d}.jpg",
-                "chosen": [
-                    {"role": "user", "content": f"<image>\n{question}"},
-                    {"role": "assistant", "content": random.choice(captions) + " It's a detailed description."},
-                ],
-                "rejected": [
-                    {"role": "user", "content": f"<image>\n{question}"},
-                    {"role": "assistant", "content": "I see an image. It has stuff in it."},
-                ],
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "image": f"images/img_{i:06d}.jpg",
+                        "chosen": [
+                            {"role": "user", "content": f"<image>\n{question}"},
+                            {
+                                "role": "assistant",
+                                "content": random.choice(captions)
+                                + " It's a detailed description.",
+                            },
+                        ],
+                        "rejected": [
+                            {"role": "user", "content": f"<image>\n{question}"},
+                            {
+                                "role": "assistant",
+                                "content": "I see an image. It has stuff in it.",
+                            },
+                        ],
+                    }
+                )
+                + "\n"
+            )
 
     # GRPO data
     with open(os.path.join(output_dir, "mm_grpo.jsonl"), "w") as f:
         for i in range(num_grpo):
-            f.write(json.dumps({
-                "image": f"charts/chart_{i:04d}.png",
-                "prompt": f"<image>\nWhat is the value at position {random.randint(1, 10)}?",
-                "answer": str(random.randint(10, 100)),
-            }) + "\n")
+            f.write(
+                json.dumps(
+                    {
+                        "image": f"charts/chart_{i:04d}.png",
+                        "prompt": f"<image>\nWhat is the value at position {random.randint(1, 10)}?",
+                        "answer": str(random.randint(10, 100)),
+                    }
+                )
+                + "\n"
+            )
 
     print(f"Generated synthetic multimodal data in {output_dir}/")
     print(f"  mm_alignment.jsonl: {num_alignment} examples")

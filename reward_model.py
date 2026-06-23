@@ -17,20 +17,28 @@ Data format (JSONL):
 
 import argparse
 import json
-import math
 import os
 import time
 from contextlib import nullcontext
-from typing import Dict, List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import deepspeed
 from torch.utils.data import Dataset
 
-import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import DelayedScaling, Format
+try:
+    import deepspeed
+except ImportError:  # pragma: no cover - optional distributed dependency
+    deepspeed = None
+
+try:
+    import transformer_engine.pytorch as te
+    from transformer_engine.common.recipe import DelayedScaling, Format
+except ImportError:  # pragma: no cover - optional GPU dependency
+    te = None
+    DelayedScaling = None
+    Format = None
 
 from train import GPTModel, ModelConfig
 from sft import ChatTokenizer
@@ -48,7 +56,9 @@ class RewardModel(nn.Module):
         self.reward_head = nn.Linear(backbone.config.d_model, 1, bias=False)
         nn.init.zeros_(self.reward_head.weight)
 
-    def forward(self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None):
+    def forward(
+        self, input_ids: torch.Tensor, attention_mask: Optional[torch.Tensor] = None
+    ):
         """
         Returns scalar reward for each sequence.
         Uses the last non-padding token's representation.
@@ -78,7 +88,9 @@ class RewardModel(nn.Module):
 class PreferenceDataset(Dataset):
     """Preference pairs: chosen vs rejected responses."""
 
-    def __init__(self, data_path: str, tokenizer: ChatTokenizer, max_seq_len: int = 2048):
+    def __init__(
+        self, data_path: str, tokenizer: ChatTokenizer, max_seq_len: int = 2048
+    ):
         self.tokenizer = tokenizer
         self.max_seq_len = max_seq_len
         self.pairs = []
@@ -101,7 +113,7 @@ class PreferenceDataset(Dataset):
 
     def _tokenize(self, messages):
         encoded = self.tokenizer.encode_chat(messages)
-        ids = encoded["input_ids"][:self.max_seq_len]
+        ids = encoded["input_ids"][: self.max_seq_len]
         return torch.tensor(ids, dtype=torch.long)
 
     def __getitem__(self, idx):
@@ -142,7 +154,7 @@ class PreferenceCollator:
                 all_masks.append(mask)
 
         B = len(batch)
-        input_ids = torch.stack(all_ids)            # (2B, S)
+        input_ids = torch.stack(all_ids)  # (2B, S)
         attention_mask = torch.stack(all_masks).long()  # (2B, S)
 
         return {
@@ -155,7 +167,9 @@ class PreferenceCollator:
 # =============================================================================
 # Reward Model Loss
 # =============================================================================
-def reward_loss(chosen_rewards: torch.Tensor, rejected_rewards: torch.Tensor) -> Tuple[torch.Tensor, dict]:
+def reward_loss(
+    chosen_rewards: torch.Tensor, rejected_rewards: torch.Tensor
+) -> Tuple[torch.Tensor, dict]:
     """
     Bradley-Terry preference model loss.
     loss = -log(sigmoid(r_chosen - r_rejected))
@@ -179,6 +193,9 @@ def reward_loss(chosen_rewards: torch.Tensor, rejected_rewards: torch.Tensor) ->
 # Training
 # =============================================================================
 def train_reward_model(args):
+    if deepspeed is None:
+        raise ImportError("DeepSpeed is required for reward model training.")
+
     deepspeed.init_distributed()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     global_rank = int(os.environ.get("RANK", 0))
@@ -192,7 +209,7 @@ def train_reward_model(args):
         "1.3b": dict(n_layers=24, n_heads=32, d_model=2048),
         "2.7b": dict(n_layers=32, n_heads=32, d_model=2560),
         "6.7b": dict(n_layers=32, n_heads=32, d_model=4096),
-        "13b":  dict(n_layers=40, n_heads=40, d_model=5120),
+        "13b": dict(n_layers=40, n_heads=40, d_model=5120),
     }
 
     model_kwargs = MODEL_CONFIGS.get(args.model_size, MODEL_CONFIGS["350m"])
@@ -225,7 +242,9 @@ def train_reward_model(args):
     # FP8
     fp8_ctx = nullcontext()
     if args.use_te and args.fp8:
-        fp8_recipe = DelayedScaling(fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max")
+        fp8_recipe = DelayedScaling(
+            fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max"
+        )
         fp8_ctx = te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe)
 
     # DeepSpeed
@@ -280,7 +299,9 @@ def train_reward_model(args):
             avg_loss = running_loss / args.log_interval
             avg_acc = running_acc / args.log_interval
             elapsed = time.time() - t_start
-            print(f"step {step:6d} | loss {avg_loss:.4f} | acc {avg_acc:.3f} | {elapsed:.1f}s")
+            print(
+                f"step {step:6d} | loss {avg_loss:.4f} | acc {avg_acc:.3f} | {elapsed:.1f}s"
+            )
             running_loss = 0.0
             running_acc = 0.0
 
@@ -304,8 +325,12 @@ def parse_args():
     parser.add_argument("--no_flash_attn", action="store_false", dest="use_flash_attn")
     parser.add_argument("--use_te", action="store_true", default=True)
     parser.add_argument("--no_te", action="store_false", dest="use_te")
-    parser.add_argument("--use_flash_attn_3", action="store_true", default=False,
-                        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)")
+    parser.add_argument(
+        "--use_flash_attn_3",
+        action="store_true",
+        default=False,
+        help="Use Flash Attention 3 via kernels library (requires Hopper GPU)",
+    )
     parser.add_argument("--fp8", action="store_true", default=False)
     parser.add_argument("--data_path", type=str, required=True)
     parser.add_argument("--max_steps", type=int, default=2000)

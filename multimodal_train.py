@@ -48,33 +48,44 @@ Usage:
 """
 
 import argparse
-import math
 import os
 import time
 from contextlib import nullcontext
-from typing import Dict, List, Optional
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import deepspeed
 
-import transformer_engine.pytorch as te
-from transformer_engine.common.recipe import DelayedScaling, Format
+try:
+    import deepspeed
+except ImportError:  # pragma: no cover - optional distributed dependency
+    deepspeed = None
 
-from train import ModelConfig
+try:
+    import transformer_engine.pytorch as te
+    from transformer_engine.common.recipe import DelayedScaling, Format
+except ImportError:  # pragma: no cover - optional GPU dependency
+    te = None
+    DelayedScaling = None
+    Format = None
+
 from sft import ChatTokenizer
-from vision_encoder import VisionConfig
-from multimodal_model import MultimodalConfig, MultimodalLLM, create_multimodal_model
+from multimodal_model import create_multimodal_model
 from multimodal_data import (
-    AlignmentDataset, AlignmentCollator,
-    MultimodalSFTDataset, MultimodalSFTCollator,
-    MultimodalDPODataset, MultimodalGRPODataset,
+    AlignmentDataset,
+    AlignmentCollator,
+    MultimodalSFTDataset,
+    MultimodalSFTCollator,
+    MultimodalDPODataset,
+    MultimodalGRPODataset,
 )
 from dpo import dpo_loss, get_batch_logps
 from grpo import (
-    GRPOConfig, RuleBasedReward, grpo_advantages, grpo_loss,
-    generate_group, compute_ref_log_probs,
+    GRPOConfig,
+    RuleBasedReward,
+    grpo_advantages,
+    grpo_loss,
+    generate_group,
+    compute_ref_log_probs,
 )
 
 
@@ -90,7 +101,7 @@ def train_stage1(args, model_engine, train_loader, fp8_ctx, global_rank):
 
     if global_rank == 0:
         print(f"\n{'='*70}")
-        print(f"Stage 1: Vision-Language Alignment Pre-training")
+        print("Stage 1: Vision-Language Alignment Pre-training")
         print(f"{'='*70}\n")
 
     data_iter = iter(train_loader)
@@ -148,7 +159,7 @@ def train_stage2(args, model_engine, train_loader, fp8_ctx, global_rank):
 
     if global_rank == 0:
         print(f"\n{'='*70}")
-        print(f"Stage 2: Multimodal Instruction Tuning")
+        print("Stage 2: Multimodal Instruction Tuning")
         print(f"{'='*70}\n")
 
     data_iter = iter(train_loader)
@@ -260,8 +271,10 @@ def train_stage3_dpo(args, model_engine, ref_model, train_loader, fp8_ctx, globa
 
         # DPO loss
         loss, metrics = dpo_loss(
-            policy_chosen_logps, policy_rejected_logps,
-            ref_chosen_logps, ref_rejected_logps,
+            policy_chosen_logps,
+            policy_rejected_logps,
+            ref_chosen_logps,
+            ref_rejected_logps,
             beta=args.beta,
         )
 
@@ -276,8 +289,10 @@ def train_stage3_dpo(args, model_engine, ref_model, train_loader, fp8_ctx, globa
             n = args.log_interval
             avg = {k: v / n for k, v in running_metrics.items()}
             elapsed = time.time() - t_start
-            print(f"step {step:6d} | loss {avg['loss']:.4f} | "
-                  f"acc {avg['accuracy']:.3f} | {elapsed:.1f}s")
+            print(
+                f"step {step:6d} | loss {avg['loss']:.4f} | "
+                f"acc {avg['accuracy']:.3f} | {elapsed:.1f}s"
+            )
             running_metrics = {}
 
         if args.save_interval > 0 and step % args.save_interval == 0:
@@ -293,8 +308,9 @@ def train_stage3_dpo(args, model_engine, ref_model, train_loader, fp8_ctx, globa
 # =============================================================================
 # Stage 3b: Multimodal GRPO
 # =============================================================================
-def train_stage3_grpo(args, model_engine, ref_model, tokenizer, train_loader,
-                      fp8_ctx, global_rank):
+def train_stage3_grpo(
+    args, model_engine, ref_model, tokenizer, train_loader, fp8_ctx, global_rank
+):
     """Multimodal GRPO with visual context and rule-based rewards."""
     model_engine.train()
     step = 0
@@ -339,18 +355,14 @@ def train_stage3_grpo(args, model_engine, ref_model, tokenizer, train_loader,
         with torch.no_grad():
             policy_model.eval()
 
-            # First encode visual features
-            visual_tokens = None
-            if pixel_values is not None:
-                visual_tokens = policy_model.vision(pixel_values=pixel_values)
-
             # Generate using the LLM part
             # Expand prompts for group
             expanded_ids = prompt_ids.repeat_interleave(G, dim=0)  # (BG, prompt_len)
 
             # Simple generation (using LLM backbone)
             full_ids, old_log_probs = generate_group(
-                policy_model.llm, expanded_ids,
+                policy_model.llm,
+                expanded_ids,
                 group_size=1,  # Already expanded
                 max_new_tokens=grpo_config.max_new_tokens,
                 temperature=grpo_config.temperature,
@@ -367,7 +379,7 @@ def train_stage3_grpo(args, model_engine, ref_model, tokenizer, train_loader,
             for i in range(B * G):
                 tokens = response_ids[i].tolist()
                 if tokenizer.eos_id in tokens:
-                    tokens = tokens[:tokens.index(tokenizer.eos_id)]
+                    tokens = tokens[: tokens.index(tokenizer.eos_id)]
                 completions.append(tokenizer.decode(tokens))
 
             expanded_prompts = [p for p in prompt_texts for _ in range(G)]
@@ -403,13 +415,17 @@ def train_stage3_grpo(args, model_engine, ref_model, tokenizer, train_loader,
 
             with fp8_ctx:
                 logits, _ = model_engine(mb_ids)
-                resp_logits = logits[:, prompt_len - 1:prompt_len - 1 + gen_len, :]
-                resp_tokens = mb_ids[:, prompt_len:prompt_len + gen_len]
+                resp_logits = logits[:, prompt_len - 1 : prompt_len - 1 + gen_len, :]
+                resp_tokens = mb_ids[:, prompt_len : prompt_len + gen_len]
                 new_lp = F.log_softmax(resp_logits, dim=-1)
                 new_lp = new_lp.gather(2, resp_tokens.unsqueeze(-1)).squeeze(-1)
 
                 loss, metrics = grpo_loss(
-                    new_lp, mb_old_lp, mb_ref_lp, mb_adv, mb_mask,
+                    new_lp,
+                    mb_old_lp,
+                    mb_ref_lp,
+                    mb_adv,
+                    mb_mask,
                     clip_eps=grpo_config.clip_eps,
                     kl_coef=kl_coef,
                 )
@@ -425,9 +441,13 @@ def train_stage3_grpo(args, model_engine, ref_model, tokenizer, train_loader,
 
         if step % args.log_interval == 0 and global_rank == 0:
             elapsed = time.time() - t_start
-            recent = sum(reward_history[-args.log_interval:]) / min(len(reward_history), args.log_interval)
-            print(f"step {step:5d} | reward {recent:+.3f} | "
-                  f"loss {total_loss / max(n_updates, 1):.4f} | {elapsed:.1f}s")
+            recent = sum(reward_history[-args.log_interval :]) / min(
+                len(reward_history), args.log_interval
+            )
+            print(
+                f"step {step:5d} | reward {recent:+.3f} | "
+                f"loss {total_loss / max(n_updates, 1):.4f} | {elapsed:.1f}s"
+            )
 
         if args.save_interval > 0 and step % args.save_interval == 0:
             model_engine.save_checkpoint(
@@ -454,12 +474,17 @@ class MultimodalDPOCollator:
         pixel_values = []
 
         max_len = min(
-            max(max(len(b["chosen_ids"]) for b in batch),
-                max(len(b["rejected_ids"]) for b in batch)),
+            max(
+                max(len(b["chosen_ids"]) for b in batch),
+                max(len(b["rejected_ids"]) for b in batch),
+            ),
             self.max_len,
         )
 
-        for key_ids, key_mask in [("chosen_ids", "chosen_mask"), ("rejected_ids", "rejected_mask")]:
+        for key_ids, key_mask in [
+            ("chosen_ids", "chosen_mask"),
+            ("rejected_ids", "rejected_mask"),
+        ]:
             for b in batch:
                 ids = b[key_ids][:max_len]
                 mask = b[key_mask][:max_len]
@@ -489,10 +514,12 @@ class MultimodalGRPOCollator:
         self.image_size = image_size
 
     def __call__(self, batch):
-        ids_list = [b["input_ids"][:self.max_len] for b in batch]
+        ids_list = [b["input_ids"][: self.max_len] for b in batch]
         max_len = max(len(ids) for ids in ids_list)
 
-        padded = [F.pad(ids, (0, max_len - len(ids)), value=self.pad_id) for ids in ids_list]
+        padded = [
+            F.pad(ids, (0, max_len - len(ids)), value=self.pad_id) for ids in ids_list
+        ]
         answers = [b.get("answer") for b in batch]
         prompts = [b.get("prompt_text", "") for b in batch]
 
@@ -504,10 +531,16 @@ class MultimodalGRPOCollator:
 
         pixel_values = [b.get("pixel_values") for b in batch]
         if pixel_values[0] is not None:
-            result["pixel_values"] = torch.stack([
-                pv if pv is not None else torch.zeros(3, self.image_size, self.image_size)
-                for pv in pixel_values
-            ])
+            result["pixel_values"] = torch.stack(
+                [
+                    (
+                        pv
+                        if pv is not None
+                        else torch.zeros(3, self.image_size, self.image_size)
+                    )
+                    for pv in pixel_values
+                ]
+            )
 
         return result
 
@@ -516,6 +549,9 @@ class MultimodalGRPOCollator:
 # Main
 # =============================================================================
 def main(args):
+    if deepspeed is None:
+        raise ImportError("DeepSpeed is required for multimodal training.")
+
     deepspeed.init_distributed()
     local_rank = int(os.environ.get("LOCAL_RANK", 0))
     global_rank = int(os.environ.get("RANK", 0))
@@ -547,36 +583,54 @@ def main(args):
 
     if args.stage == 1:
         dataset = AlignmentDataset(
-            args.data_path, args.image_dir, tokenizer,
-            image_size=args.image_size, max_seq_len=args.seq_len,
+            args.data_path,
+            args.image_dir,
+            tokenizer,
+            image_size=args.image_size,
+            max_seq_len=args.seq_len,
         )
         collator = AlignmentCollator(tokenizer.pad_id, args.seq_len)
 
     elif args.stage == 2:
         dataset = MultimodalSFTDataset(
-            args.data_path, args.image_dir, tokenizer,
-            image_size=args.image_size, max_seq_len=args.seq_len,
+            args.data_path,
+            args.image_dir,
+            tokenizer,
+            image_size=args.image_size,
+            max_seq_len=args.seq_len,
         )
         collator = MultimodalSFTCollator(
-            tokenizer.pad_id, args.seq_len, args.image_size,
+            tokenizer.pad_id,
+            args.seq_len,
+            args.image_size,
         )
 
     elif args.stage == 3 and args.rl_method == "dpo":
         dataset = MultimodalDPODataset(
-            args.data_path, args.image_dir, tokenizer,
-            image_size=args.image_size, max_seq_len=args.seq_len,
+            args.data_path,
+            args.image_dir,
+            tokenizer,
+            image_size=args.image_size,
+            max_seq_len=args.seq_len,
         )
         collator = MultimodalDPOCollator(
-            tokenizer.pad_id, args.seq_len, args.image_size,
+            tokenizer.pad_id,
+            args.seq_len,
+            args.image_size,
         )
 
     elif args.stage == 3 and args.rl_method == "grpo":
         dataset = MultimodalGRPODataset(
-            args.data_path, args.image_dir, tokenizer,
-            image_size=args.image_size, max_prompt_len=args.max_prompt_len,
+            args.data_path,
+            args.image_dir,
+            tokenizer,
+            image_size=args.image_size,
+            max_prompt_len=args.max_prompt_len,
         )
         collator = MultimodalGRPOCollator(
-            tokenizer.pad_id, args.max_prompt_len, args.image_size,
+            tokenizer.pad_id,
+            args.max_prompt_len,
+            args.image_size,
         )
 
     # -------------------------------------------------------------------------
@@ -585,7 +639,9 @@ def main(args):
     fp8_ctx = nullcontext()
     if args.fp8:
         fp8_recipe = DelayedScaling(
-            fp8_format=Format.HYBRID, amax_history_len=16, amax_compute_algo="max",
+            fp8_format=Format.HYBRID,
+            amax_history_len=16,
+            amax_compute_algo="max",
         )
         fp8_ctx = te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe)
 
@@ -630,11 +686,18 @@ def main(args):
     elif args.stage == 2:
         train_stage2(args, model_engine, train_loader, fp8_ctx, global_rank)
     elif args.stage == 3 and args.rl_method == "dpo":
-        train_stage3_dpo(args, model_engine, ref_model, train_loader, fp8_ctx, global_rank)
+        train_stage3_dpo(
+            args, model_engine, ref_model, train_loader, fp8_ctx, global_rank
+        )
     elif args.stage == 3 and args.rl_method == "grpo":
         train_stage3_grpo(
-            args, model_engine, ref_model, tokenizer,
-            train_loader, fp8_ctx, global_rank,
+            args,
+            model_engine,
+            ref_model,
+            tokenizer,
+            train_loader,
+            fp8_ctx,
+            global_rank,
         )
 
     if global_rank == 0:
@@ -651,8 +714,12 @@ def parse_args():
     # Model
     parser.add_argument("--model_size", type=str, default="350m")
     parser.add_argument("--base_model", type=str, default=None)
-    parser.add_argument("--vision_encoder", type=str, default=None,
-                        help="Pretrained vision encoder (timm model name)")
+    parser.add_argument(
+        "--vision_encoder",
+        type=str,
+        default=None,
+        help="Pretrained vision encoder (timm model name)",
+    )
     parser.add_argument("--image_size", type=int, default=448)
     parser.add_argument("--seq_len", type=int, default=2048)
     parser.add_argument("--fp8", action="store_true", default=False)

@@ -13,9 +13,8 @@ Supports:
   - Selective freezing for staged training
 """
 
-import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -37,8 +36,8 @@ class MultimodalConfig:
     # Pretrained encoder (None = train from scratch)
     pretrained_vision_encoder: str = None
     # Special token IDs
-    image_token_id: int = 50300     # <image> placeholder token
-    video_token_id: int = 50301     # <video> placeholder token
+    image_token_id: int = 50300  # <image> placeholder token
+    video_token_id: int = 50301  # <video> placeholder token
     # Freeze settings for staged training
     freeze_vision: bool = True
     freeze_llm: bool = False
@@ -109,8 +108,10 @@ class MultimodalLLM(nn.Module):
         # Count trainable params
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         total = sum(p.numel() for p in self.parameters())
-        print(f"Trainable: {trainable / 1e6:.1f}M / {total / 1e6:.1f}M "
-              f"({100 * trainable / total:.2f}%)")
+        print(
+            f"Trainable: {trainable / 1e6:.1f}M / {total / 1e6:.1f}M "
+            f"({100 * trainable / total:.2f}%)"
+        )
 
     def set_stage(self, stage: int):
         """
@@ -131,7 +132,7 @@ class MultimodalLLM(nn.Module):
             self.vision.image_start_token.requires_grad = True
             self.vision.image_end_token.requires_grad = True
             self.vision.frame_separator.requires_grad = True
-            if hasattr(self.vision, 'pixel_shuffle') and self.vision.pixel_shuffle:
+            if hasattr(self.vision, "pixel_shuffle") and self.vision.pixel_shuffle:
                 for p in self.vision.pixel_shuffle.parameters():
                     p.requires_grad = True
             print("Stage 1: Training projector only")
@@ -176,7 +177,6 @@ class MultimodalLLM(nn.Module):
             merged_embeds: (B, S + num_visual - 1, D)
         """
         B, S, D = text_embeds.shape
-        num_visual = visual_tokens.shape[1]
 
         merged_list = []
         for b in range(B):
@@ -189,7 +189,7 @@ class MultimodalLLM(nn.Module):
             # Before image token
             before = text_embeds[b, :pos]  # (pos, D)
             # After image token (skip the <image> placeholder)
-            after = text_embeds[b, pos + 1:]  # (S - pos - 1, D)
+            after = text_embeds[b, pos + 1 :]  # (S - pos - 1, D)
             # Insert visual tokens
             vis = visual_tokens[b]  # (num_visual, D)
 
@@ -198,9 +198,11 @@ class MultimodalLLM(nn.Module):
 
         # Pad to same length
         max_len = max(m.shape[0] for m in merged_list)
-        padded = torch.zeros(B, max_len, D, device=text_embeds.device, dtype=text_embeds.dtype)
+        padded = torch.zeros(
+            B, max_len, D, device=text_embeds.device, dtype=text_embeds.dtype
+        )
         for b, m in enumerate(merged_list):
-            padded[b, :m.shape[0]] = m
+            padded[b, : m.shape[0]] = m
 
         return padded
 
@@ -246,9 +248,11 @@ class MultimodalLLM(nn.Module):
             merged_list.append(torch.cat(segments, dim=0))
 
         max_len = max(m.shape[0] for m in merged_list)
-        padded = torch.zeros(B, max_len, D, device=text_embeds.device, dtype=text_embeds.dtype)
+        padded = torch.zeros(
+            B, max_len, D, device=text_embeds.device, dtype=text_embeds.dtype
+        )
         for b, m in enumerate(merged_list):
-            padded[b, :m.shape[0]] = m
+            padded[b, : m.shape[0]] = m
 
         return padded
 
@@ -276,8 +280,6 @@ class MultimodalLLM(nn.Module):
             logits: (B, S', V) output logits
             loss: scalar loss (if labels provided)
         """
-        B = input_ids.shape[0]
-
         # 1. Get text embeddings
         text_embeds = self.llm.tok_emb(input_ids)  # (B, S, D)
 
@@ -291,12 +293,17 @@ class MultimodalLLM(nn.Module):
         # 3. Merge visual tokens into text sequence
         if visual_tokens is not None and image_positions is not None:
             merged_embeds = self._merge_visual_tokens(
-                input_ids, text_embeds, visual_tokens, image_positions,
+                input_ids,
+                text_embeds,
+                visual_tokens,
+                image_positions,
             )
         elif visual_tokens is not None:
             # Auto-find <image> token positions
             merged_embeds = self._merge_multi_image_tokens(
-                text_embeds, self.config.image_token_id, input_ids,
+                text_embeds,
+                self.config.image_token_id,
+                input_ids,
                 [visual_tokens],
             )
         elif multi_images is not None:
@@ -306,7 +313,10 @@ class MultimodalLLM(nn.Module):
                 vis = self.vision(pixel_values=img.unsqueeze(0))
                 all_vis.append(vis)
             merged_embeds = self._merge_multi_image_tokens(
-                text_embeds, self.config.image_token_id, input_ids, all_vis,
+                text_embeds,
+                self.config.image_token_id,
+                input_ids,
+                all_vis,
             )
         else:
             merged_embeds = text_embeds
@@ -353,8 +363,6 @@ class MultimodalLLM(nn.Module):
     ) -> torch.Tensor:
         """Generate text conditioned on image/video + text prompt."""
         self.eval()
-        B = input_ids.shape[0]
-        device = input_ids.device
 
         # Encode visual once
         visual_tokens = None
@@ -367,7 +375,9 @@ class MultimodalLLM(nn.Module):
         text_embeds = self.llm.tok_emb(input_ids)
         if visual_tokens is not None:
             merged = self._merge_multi_image_tokens(
-                text_embeds, self.config.image_token_id, input_ids,
+                text_embeds,
+                self.config.image_token_id,
+                input_ids,
                 [visual_tokens],
             )
         else:
@@ -448,7 +458,7 @@ def create_multimodal_model(
         "1.3b": dict(n_layers=24, n_heads=32, d_model=2048),
         "2.7b": dict(n_layers=32, n_heads=32, d_model=2560),
         "6.7b": dict(n_layers=32, n_heads=32, d_model=4096),
-        "13b":  dict(n_layers=40, n_heads=40, d_model=5120),
+        "13b": dict(n_layers=40, n_heads=40, d_model=5120),
     }
 
     llm_kwargs = MODEL_CONFIGS.get(model_size, MODEL_CONFIGS["350m"])
@@ -469,7 +479,7 @@ def create_multimodal_model(
     model.set_stage(stage)
 
     params = model.num_parameters()
-    print(f"\nModel parameters:")
+    print("\nModel parameters:")
     for k, v in params.items():
         print(f"  {k}: {v / 1e6:.1f}M")
 
