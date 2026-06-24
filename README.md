@@ -201,6 +201,8 @@ Limitations:
 
 Installation
 
+Python 3.11 is recommended. The GitHub Actions quality gate runs on Python 3.11.
+
 pip install "torch>=2.1" deepspeed transformer-engine flash-attn \
     datasets tiktoken wandb tqdm
 
