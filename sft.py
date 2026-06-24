@@ -251,12 +251,19 @@ class SFTDataset(Dataset):
         messages = self.examples[idx]
         encoded = self.tokenizer.encode_chat(messages)
 
-        input_ids = encoded["input_ids"][: self.max_seq_len]
-        loss_mask = encoded["loss_mask"][: self.max_seq_len]
+        input_ids = encoded["input_ids"]
+        loss_mask = encoded["loss_mask"]
 
         # Labels: shift by 1 for next-token prediction
+        # input_ids[1:] becomes the labels (predict next token)
+        # loss_mask[1:] tells us which labels to train on
         labels = input_ids[1:] + [self.tokenizer.pad_id]
         loss_mask = loss_mask[1:] + [0]
+
+        # Truncate to max_seq_len
+        input_ids = input_ids[: self.max_seq_len]
+        labels = labels[: self.max_seq_len]
+        loss_mask = loss_mask[: self.max_seq_len]
 
         # Apply loss mask: set non-trainable positions to -100
         labels = [
