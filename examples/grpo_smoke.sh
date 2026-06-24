@@ -52,6 +52,6 @@ loss, metrics = grpo_loss(
 )
 
 assert torch.isfinite(loss)
-assert "policy_loss" in metrics
+assert "pg_loss" in metrics
 print("grpo smoke passed")
 PY
