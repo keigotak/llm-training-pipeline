@@ -3,12 +3,14 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+PYTHON=${PYTHON:-python}
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-python generate_grpo_data.py --output "$tmpdir/grpo_prompts.jsonl" --num 4
+$PYTHON generate_grpo_data.py --output "$tmpdir/grpo_prompts.jsonl" --num 4
 
-python - "$tmpdir/grpo_prompts.jsonl" <<'PY'
+$PYTHON - "$tmpdir/grpo_prompts.jsonl" <<'PY'
 import sys
 
 import torch

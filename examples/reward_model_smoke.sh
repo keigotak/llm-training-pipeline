@@ -3,16 +3,18 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+PYTHON=${PYTHON:-python}
+
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-python generate_sample_data.py \
+$PYTHON generate_sample_data.py \
   --output_dir "$tmpdir" \
   --num_sft 2 \
   --num_preference 2 \
   --num_prompts 2
 
-python - "$tmpdir/preference_train.jsonl" <<'PY'
+$PYTHON - "$tmpdir/preference_train.jsonl" <<'PY'
 import sys
 
 import torch

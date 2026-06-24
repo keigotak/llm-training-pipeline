@@ -3,7 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-python - <<'PY'
+PYTHON=${PYTHON:-python}
+
+$PYTHON - <<'PY'
 import torch
 
 from train import GPTModel, ModelConfig, SyntheticDataset
