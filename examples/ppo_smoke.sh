@@ -23,8 +23,8 @@ from sft import ChatTokenizer
 
 data_path = sys.argv[1]
 tokenizer = ChatTokenizer()
-dataset = PromptDataset(data_path, tokenizer, max_prompt_len=64)
-collator = PromptCollator(tokenizer.pad_id, max_len=64)
+dataset = PromptDataset(data_path, tokenizer, max_prompt_len=256)
+collator = PromptCollator(tokenizer.pad_id, max_len=256)
 batch = collator([dataset[0], dataset[1]])
 config = PPOConfig(max_new_tokens=4, rollout_batch_size=2, ppo_mini_batch_size=1)
 

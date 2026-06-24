@@ -25,8 +25,8 @@ from sft import ChatTokenizer
 
 data_path = sys.argv[1]
 tokenizer = ChatTokenizer()
-dataset = PreferenceDataset(data_path, tokenizer, max_seq_len=64)
-collator = PreferenceCollator(tokenizer.pad_id, max_seq_len=64)
+dataset = PreferenceDataset(data_path, tokenizer, max_seq_len=256)
+collator = PreferenceCollator(tokenizer.pad_id, max_seq_len=256)
 batch = collator([dataset[0], dataset[1]])
 
 assert batch["input_ids"].shape[0] == 4
